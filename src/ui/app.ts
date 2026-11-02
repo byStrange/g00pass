@@ -13,6 +13,7 @@ import {
 } from '../core';
 import { h, clear } from './dom';
 import { deviceKeyInfo, forgetDeviceKey, loadDeviceKeyArmored, saveDeviceKey } from './keystore';
+import { mountInbox } from './inbox';
 import { Session, copyWithAutoClear } from './session';
 
 const CONFIG_KEY = 'g00pass.repo-config.v1';
@@ -22,7 +23,7 @@ const CLIPBOARD_CLEAR_MS = 30_000;
 function loadConfig(): GitHubRepo {
   try {
     const c = JSON.parse(localStorage.getItem(CONFIG_KEY) ?? '{}') as Partial<GitHubRepo>;
-    return { owner: c.owner ?? '', repo: c.repo ?? '', branch: c.branch ?? 'main', storeRoot: c.storeRoot ?? '' };
+    return { owner: c.owner ?? '', repo: c.repo ?? '', branch: c.branch ?? 'main', storeRoot: c.storeRoot ?? '', requestsRepo: c.requestsRepo };
   } catch {
     return { owner: '', repo: '', branch: 'main', storeRoot: '' };
   }
@@ -84,6 +85,7 @@ export function mountApp(root: HTMLElement): void {
           repo: f.repo.value.trim(),
           branch: f.branch.value.trim() || 'main',
           storeRoot: f.storeRoot.value.trim(),
+          requestsRepo: config.requestsRepo,
         };
         localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
         if (f.token.value) tokens.set(f.token.value, f.remember.checked ? 'session' : 'memory');
@@ -241,6 +243,16 @@ export function mountApp(root: HTMLElement): void {
     }
   }
 
+  // ----- admin inbox (access requests) -----
+  const inbox = mountInbox({
+    client,
+    getConfig: () => config,
+    deviceFingerprint: async () => (await deviceKeyInfo().catch(() => null))?.fingerprint ?? null,
+    session,
+    setStatus,
+    onApproved: () => void refresh(),
+  });
+
   // ----- layout -----
   const header = h(
     'header',
@@ -254,7 +266,7 @@ export function mountApp(root: HTMLElement): void {
     void renderKeyCard();
   }
 
-  root.append(header, status, configForm, keyCard, entriesCard, entryView, footer);
+  root.append(header, status, configForm, keyCard, entriesCard, inbox.el, entryView, footer);
   render();
   if (tokens.hasToken) void refresh();
 }

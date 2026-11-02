@@ -25,7 +25,9 @@ const secrets: Record<string, string> = { 'team/db.gpg': 'db-pass', 'team/api/to
 const ctx = { repo: 'acme/secrets', storeRoot: '' };
 
 beforeAll(async () => {
-  [alice, bob, carol, dave, escrow] = await Promise.all(['Alice', 'Bob', 'Carol', 'Dave', 'Escrow'].map(makeIdentity));
+  [alice, bob, carol, dave, escrow] = (await Promise.all(['Alice', 'Bob', 'Carol', 'Dave', 'Escrow'].map(makeIdentity))) as [
+    TestIdentity, TestIdentity, TestIdentity, TestIdentity, TestIdentity,
+  ];
 });
 
 beforeEach(async () => {
