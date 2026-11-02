@@ -16,6 +16,8 @@ export interface GitHubRepo {
   branch: string;
   /** Sub-directory of the repo that is the store root ("" = repo root). */
   storeRoot?: string;
+  /** `owner/name` of the private access-requests repo; falls back to the store repo. */
+  requestsRepo?: string;
 }
 
 export interface GitHubClientOptions {
