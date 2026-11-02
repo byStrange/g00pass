@@ -68,12 +68,19 @@ export const passThroughTrustHook: TrustHook = {
 };
 
 let installedHook: TrustHook = passThroughTrustHook;
+let hookLocked = false;
 
 /** Install the trust policy. Call once at app start-up (and in tests). Returns the previous hook. */
 export function setTrustHook(hook: TrustHook): TrustHook {
+  if (hookLocked) throw new TrustError('', 'trust hook is locked; it can only be set at start-up');
   const prev = installedHook;
   installedHook = hook;
   return prev;
+}
+
+/** Freeze the installed trust policy for the lifetime of the page (src/main.ts calls this). */
+export function lockTrustHook(): void {
+  hookLocked = true;
 }
 
 export function getTrustHook(): TrustHook {

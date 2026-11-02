@@ -42,6 +42,9 @@ export class GitHubSnapshot implements StoreSnapshot {
 
   static async load(client: GitHubClient, repo: GitHubRepo, opts: { commitSha?: string; signal?: AbortSignal } = {}) {
     validateRepo(repo);
+    if (opts.commitSha !== undefined && !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(opts.commitSha)) {
+      throw new G00passError('commitSha must be a full hex commit sha');
+    }
     const commitSha = opts.commitSha ?? (await getBranchHead(client, repo, opts.signal));
     const commit = await client.request<CommitResponse>('GET', repoPath(repo, `/git/commits/${commitSha}`), undefined, opts.signal);
     const tree = await client.request<TreeResponse>(

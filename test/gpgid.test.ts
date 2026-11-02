@@ -177,6 +177,8 @@ describe('governed entries (re-encrypt scope)', () => {
     'infra/notes.txt': 'not an entry',
     'infra/.gpg': 'not an entry (no name)',
     'infrastructure/e.gpg': 'c',
+    '.public-keys/odd.gpg': 'key file, not an entry',
+    '.g00pass/x.gpg': 'metadata dir, not an entry',
   });
   it('stops at nested .gpg-id boundaries', () => {
     expect(listGovernedEntries(store, 'infra')).toEqual(['infra/a.gpg', 'infra/sub/b.gpg']);

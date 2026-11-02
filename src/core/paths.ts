@@ -42,7 +42,11 @@ export function isWithin(p: string, folder: string): boolean {
   return folder === '' || p === folder || p.startsWith(folder + '/');
 }
 
+/** Top-level directories that hold g00pass/gopass metadata, never entries. */
+export const NON_ENTRY_DIRS = [PUBLIC_KEYS_DIR, LEGACY_PUBLIC_KEYS_DIR, '.g00pass', '.git'];
+
 export function isEntryFile(p: string): boolean {
+  if (NON_ENTRY_DIRS.some((d) => p.startsWith(d + '/'))) return false;
   return p.endsWith(ENTRY_EXT) && basename(p).length > ENTRY_EXT.length;
 }
 

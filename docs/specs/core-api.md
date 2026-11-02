@@ -34,6 +34,7 @@ PUBLIC_KEYS_DIR = '.public-keys'; LEGACY_PUBLIC_KEYS_DIR = '.gpg-keys'
 normalizePath(p): string            joinPath(...parts): string
 dirname(p) / basename(p)            isWithin(p, folder): boolean
 isEntryFile(p) / entryName(p) / entryFile(nameOrPath)
+NON_ENTRY_DIRS = ['.public-keys', '.gpg-keys', '.g00pass', '.git']   // *.gpg under these are never entries
 ancestorsInclusive(folder): string[] // "a/b" -> ["a/b","a",""]
 isHiddenEntry(p): boolean            // any dot-segment; hide from UI lists
 ```
@@ -117,6 +118,7 @@ interface TrustHook { name: string; verify(req): Promise<TrustDecision> }
 
 passThroughTrustHook           // Phase 0 default: ok + warning 'recipient-signatures-not-verified'
 setTrustHook(hook): TrustHook  // install once at startup (src/main.ts); returns previous
+lockTrustHook(): void          // main.ts locks after install; later setTrustHook throws
 getTrustHook(): TrustHook
 
 interface VerifiedRecipientSet {   // frozen; only mintable inside trust.ts
@@ -144,7 +146,9 @@ The core enforces these rules regardless of which hook is installed:
 
 **To implement signature checks**, write a `TrustHook` that follows
 [gpg-id-signatures.md](gpg-id-signatures.md) and install it in `src/main.ts`.
-Do not add new entry points that produce `VerifiedRecipientSet`.
+Do not add new entry points that produce `VerifiedRecipientSet`. Tests may
+call `setTrustHook` freely, but production code may not call it outside
+`src/main.ts` (which calls `lockTrustHook()` right after installing the hook).
 
 ## Crypto — `src/core/crypto/`
 
