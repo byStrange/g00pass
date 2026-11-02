@@ -2,7 +2,7 @@ import { defineConfig, type Plugin } from 'vite';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { CSP_HEADER, CSP_META } from './csp.config';
+import { CSP_HEADER, CSP_META } from './csp.config.ts';
 
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as {
   version: string;
@@ -31,10 +31,9 @@ function securityAndPwa(): Plugin {
     transformIndexHtml: {
       order: 'post',
       handler(html) {
-        return html.replace(
-          '<head>',
-          `<head>\n    <meta http-equiv="Content-Security-Policy" content="${CSP_META}">`,
-        );
+        const tag = `<meta http-equiv="Content-Security-Policy" content="${CSP_META}">`;
+        if (!html.includes('<meta charset="utf-8">')) throw new Error('index.html must declare <meta charset="utf-8">');
+        return html.replace('<meta charset="utf-8">', `<meta charset="utf-8">\n    ${tag}`);
       },
     },
     generateBundle(_opts, bundle) {

@@ -6,7 +6,7 @@
   "description": "gopass-web: browser-side OpenPGP client for gopass/pass stores hosted on GitHub",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit -p tsconfig.json && vite build",
+    "build": "tsc --noEmit -p tsconfig.json && vite build && node scripts/check-dist.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",

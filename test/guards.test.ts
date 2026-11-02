@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { CSP_DIRECTIVES, CSP_HEADER, CSP_META } from '../csp.config';
+import { CSP_DIRECTIVES, CSP_HEADER, CSP_META } from '../csp.config.ts';
 import pkg from '../package.json';
 
 const ROOT = join(__dirname, '..');
