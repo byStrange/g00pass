@@ -4,8 +4,15 @@ import { encryptToVerified } from './crypto/encrypt';
 import { DecryptError, ReencryptError, throwIfAborted } from './errors';
 import type { GpgIdLine } from './gpgid';
 import { parsePublicKey, fingerprintOf } from './keys';
-import { GPG_ID_SIG, PUBLIC_KEYS_DIR, joinPath, normalizePath } from './paths';
-import { type CommitResult, type FileChange, type StoreSnapshot, type StoreWriter, listGovernedEntries } from './store';
+import { GPG_ID_SIG, PUBLIC_KEYS_DIR, entryFile, isWithin, joinPath, normalizePath } from './paths';
+import {
+  type CommitResult,
+  type FileChange,
+  type StoreSnapshot,
+  type StoreWriter,
+  listGovernedEntries,
+  nestedGpgIdFolders,
+} from './store';
 import { verifyProposedRecipients } from './trust';
 
 export interface ReencryptProgress {
@@ -33,6 +40,13 @@ export interface ReencryptOptions {
    * signature must never sit next to a changed `.gpg-id`).
    */
   gpgIdSignature?: Uint8Array | ((gpgIdText: string) => Promise<Uint8Array>);
+  /**
+   * New plaintext for governed entries (e.g. the folder's `.g00pass-rotation.gpg`
+   * with an updated member list), encrypted to the NEW verified recipient set
+   * instead of re-encrypting the old content. Paths may be new. Each must be
+   * governed by `folder` (not inside a nested `.gpg-id` folder).
+   */
+  replaceEntries?: readonly { path: string; plaintext: Uint8Array }[];
   /** Additional files for the same commit (e.g. admin metadata). Must not touch entries/.gpg-id. */
   extraChanges?: readonly FileChange[];
   message?: string;
@@ -88,7 +102,17 @@ export async function reencryptFolder(
     pending.set(fpr.toUpperCase(), armored);
   }
 
-  const entries = listGovernedEntries(snapshot, folder);
+  const replacements = new Map<string, Uint8Array>();
+  const boundaries = nestedGpgIdFolders(snapshot, folder);
+  for (const r of opts.replaceEntries ?? []) {
+    const p = entryFile(r.path);
+    if (!isWithin(p, folder) || boundaries.some((b) => isWithin(p, b)) || replacements.has(p)) {
+      throw new ReencryptError(`replaceEntries path "${p}" is not governed by "${folder || '/'}" or is duplicated`);
+    }
+    replacements.set(p, r.plaintext);
+  }
+
+  const entries = listGovernedEntries(snapshot, folder).filter((p) => !replacements.has(p));
   const total = entries.length;
   opts.onProgress?.({ phase: 'verifying', done: 0, total });
 
@@ -133,6 +157,11 @@ export async function reencryptFolder(
     );
   }
 
+  for (const [p, plain] of replacements) {
+    throwIfAborted(signal);
+    out.push({ path: p, content: await encryptToVerified(plain, proposed.verified, { armor: opts.armor }) });
+  }
+
   const changes: FileChange[] = [...out, { path: proposed.gpgIdPath, content: proposed.gpgIdText }];
   const sigPath = joinPath(folder, GPG_ID_SIG);
   if (proposed.gpgIdSignature) changes.push({ path: sigPath, content: proposed.gpgIdSignature });
@@ -162,7 +191,7 @@ export async function reencryptFolder(
   return {
     ...res,
     folder,
-    entries,
+    entries: [...entries, ...replacements.keys()].sort(),
     fingerprints: proposed.verified.fingerprints,
     gpgIdText: proposed.gpgIdText,
     warnings: proposed.verified.warnings,

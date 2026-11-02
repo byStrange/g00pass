@@ -164,6 +164,27 @@ describe('reencryptFolder', () => {
     expect(writer.commits).toHaveLength(0);
   });
 
+  it('replaceEntries writes new plaintext encrypted to the new set, in the same commit', async () => {
+    const res = await reencryptFolder('team', [alice.fpr, bob.fpr], {
+      snapshot: store,
+      writer,
+      decryptionKeys: [alice.priv],
+      pendingKeys: new Map([[bob.fpr, bob.armoredPublic]]),
+      replaceEntries: [{ path: 'team/.g00pass-rotation', plaintext: new TextEncoder().encode('{"members":[]}') }],
+    });
+    expect(res.entries).toContain('team/.g00pass-rotation.gpg');
+    expect(writer.commits).toHaveLength(1);
+    expect(await decryptText((await store.readFile('team/.g00pass-rotation.gpg'))!, bob)).toBe('{"members":[]}');
+    await expect(
+      reencryptFolder('team', [alice.fpr], {
+        snapshot: store,
+        writer: new MemoryWriter(store),
+        decryptionKeys: [alice.priv],
+        replaceEntries: [{ path: 'team/private/x', plaintext: new Uint8Array() }],
+      }),
+    ).rejects.toThrow(/not governed/);
+  });
+
   it('rejects extraChanges touching entries or .gpg-id', async () => {
     await expect(
       reencryptFolder('team', [alice.fpr], {
