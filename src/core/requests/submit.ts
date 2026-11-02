@@ -56,7 +56,9 @@ export async function createAccessRequestIssue(
   const { owner, repo } = parseOwnerRepo(requestsRepo);
   const issue = await client.createIssue({ owner, repo }, { title: built.title, body: built.body, labels: [REQUEST_LABEL] }, signal);
   const labelled = issue.labels.some((l) => l === REQUEST_LABEL);
-  return { requestsRepo: `${owner}/${repo}`, issueNumber: issue.number, url: issue.html_url, labelled };
+  // Never trust the response for a link target: pin it to github.com.
+  const url = issue.html_url.startsWith('https://github.com/') ? issue.html_url : `https://github.com/${owner}/${repo}/issues/${issue.number}`;
+  return { requestsRepo: `${owner}/${repo}`, issueNumber: issue.number, url, labelled };
 }
 
 /** User-facing explanation for a failed submission. Never includes the token. */
