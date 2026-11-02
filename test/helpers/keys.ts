@@ -10,12 +10,13 @@ export interface TestIdentity {
 }
 
 /** v4 curve25519 keys (gpg/gopass compatible), unprotected for test speed. */
-export async function makeIdentity(name: string): Promise<TestIdentity> {
+export async function makeIdentity(name: string, date?: Date): Promise<TestIdentity> {
   const email = `${name.toLowerCase()}@example.test`;
   const { privateKey, publicKey } = await openpgp.generateKey({
     type: 'ecc',
     curve: 'curve25519Legacy',
     userIDs: [{ name, email }],
+    date,
     format: 'armored',
   });
   const priv = await openpgp.readPrivateKey({ armoredKey: privateKey });

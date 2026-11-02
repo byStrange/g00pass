@@ -2,6 +2,7 @@ import { G00passError } from '../errors';
 import { isWithin, joinPath, normalizePath } from '../paths';
 import type { StoreSnapshot } from '../store';
 import { type GitHubClient, type GitHubRepo, refPath, repoPath, validateRepo } from './client';
+import { type FileHistory, GitHubFileHistory } from './history';
 
 interface RefResponse {
   object: { sha: string; type: string };
@@ -86,6 +87,10 @@ export class GitHubSnapshot implements StoreSnapshot {
       this.cache.set(sha, data);
     }
     return data.slice();
+  }
+  /** History of store files reachable from THIS snapshot's commit (trust: admins chain of custody). */
+  fileHistory(): FileHistory {
+    return new GitHubFileHistory(this.client, this.repo, this.commitSha);
   }
   /** Repo-relative path for a store-relative path. */
   repoPathOf(path: string): string {

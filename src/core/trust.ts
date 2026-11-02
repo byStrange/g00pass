@@ -83,6 +83,11 @@ export function lockTrustHook(): void {
   hookLocked = true;
 }
 
+/** True once lockTrustHook() ran (trust configuration is frozen for this page). */
+export function isTrustHookLocked(): boolean {
+  return hookLocked;
+}
+
 export function getTrustHook(): TrustHook {
   return installedHook;
 }

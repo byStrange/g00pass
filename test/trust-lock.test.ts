@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TrustError, getTrustHook, lockTrustHook, passThroughTrustHook, setTrustHook } from '../src/core';
+import { MemoryTrustStorage, TrustError, getTrustHook, lockTrustHook, passThroughTrustHook, resetTrustEnvironment, setTrustEnvironment, setTrustHook } from '../src/core';
 
 // Own file: vitest isolates modules per test file, so the lock does not leak.
 describe('lockTrustHook', () => {
@@ -9,5 +9,9 @@ describe('lockTrustHook', () => {
     lockTrustHook();
     expect(() => setTrustHook(passThroughTrustHook)).toThrow(TrustError);
     expect(getTrustHook()).toBe(strict);
+    // the trust environment (anchor storage, store identity, clock) is frozen too
+    expect(() => setTrustEnvironment({ storage: new MemoryTrustStorage() })).toThrow(TrustError);
+    expect(() => setTrustEnvironment({ now: () => new Date(0) })).toThrow(TrustError);
+    expect(() => resetTrustEnvironment()).toThrow(TrustError);
   });
 });

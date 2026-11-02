@@ -13,3 +13,11 @@ export * from './token';
 export * from './github/client';
 export { GitHubSnapshot, getBranchHead, base64ToBytes, bytesToBase64 } from './github/snapshot';
 export { commitChanges, GitHubWriter, withConflictRetry, type CommitOptions } from './github/commit';
+// Phase 1 trust (Agent C): pinned anchors, .gpg-id signatures, folder admins.
+export * from './canonical';
+export * from './signatures';
+export * from './trust-env';
+export * from './anchors';
+export * from './admins';
+export * from './trust-policy';
+export { GitHubFileHistory, type FileHistory, type FileVersion } from './github/history';

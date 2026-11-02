@@ -47,7 +47,13 @@ export type TrustErrorCode =
   | 'signature-invalid'
   | 'unknown-signer'
   | 'escrow-missing'
-  | 'not-verified';
+  | 'not-verified'
+  /** Root `.gpg-id` is not signed by a pinned trust anchor (store-layout.md §Trust anchors). */
+  | 'anchor-mismatch'
+  /** `.gpg-id` + `.sig` older than a version this device already accepted (rollback). */
+  | 'replayed'
+  /** Recipient id is not a full primary fingerprint, or its key file does not match it. */
+  | 'weak-recipient';
 
 /** Decryption of an entry failed (wrong key, corrupt data, not a recipient). */
 export class DecryptError extends G00passError {
