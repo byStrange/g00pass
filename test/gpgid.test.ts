@@ -5,6 +5,7 @@ import {
   StorePathError,
   findGpgIdForEntry,
   findGpgIdForFolder,
+  isHiddenEntry,
   keyIdKind,
   listGovernedEntries,
   nestedGpgIdFolders,
@@ -150,6 +151,12 @@ describe('nearest .gpg-id resolution', () => {
     expect(() => findGpgIdForEntry(h, '')).toThrow(StorePathError);
     expect(() => normalizePath('a\\b')).toThrow(StorePathError);
     expect(() => normalizePath('a\0b')).toThrow(StorePathError);
+  });
+
+  it('isHiddenEntry flags dot-files and dot-folders', () => {
+    expect(isHiddenEntry('team/.g00pass-rotation.gpg')).toBe(true);
+    expect(isHiddenEntry('.hidden/x.gpg')).toBe(true);
+    expect(isHiddenEntry('team/db.gpg')).toBe(false);
   });
 
   it('a folder named ".gpg-id.gpg" style entry is still an entry', () => {

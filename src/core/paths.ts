@@ -69,3 +69,12 @@ export function ancestorsInclusive(folder: string): string[] {
     cur = dirname(cur);
   }
 }
+
+/**
+ * Entries whose file name starts with "." (e.g. `.g00pass-rotation.gpg`) are
+ * g00pass metadata: encrypted and re-encrypted like entries, but hidden from
+ * entry lists in the UI.
+ */
+export function isHiddenEntry(p: string): boolean {
+  return normalizePath(p).split('/').some((seg) => seg.startsWith('.'));
+}

@@ -107,6 +107,16 @@ describe('commitChanges (Git Data API)', () => {
     expect(dec(gh.filesAt('main').get('a')!)).toBe('someone else');
   });
 
+  it('a refused ref update on an unmoved branch (e.g. protection) is NOT a conflict', async () => {
+    const base = gh.seed('main', { a: '1' });
+    gh.failWith = { match: /PATCH /, status: 422, message: 'Protected branch update failed' };
+    const err = await commitChanges(client, repo, [{ path: 'b', content: 'x' }], { baseSha: base, message: 'm' }).catch((e) => e);
+    expect(err).toBeInstanceOf(GitHubApiError);
+    expect(err).not.toBeInstanceOf(ConflictError);
+    expect(err.message).toMatch(/Protected branch/);
+    expect(gh.refs.get('main')).toBe(base);
+  });
+
   it('withConflictRetry recomputes from a fresh snapshot and succeeds', async () => {
     gh.seed('main', { 'n.txt': '0' });
     let raced = false;
@@ -172,6 +182,21 @@ describe('entry write path through GitHub', () => {
     const snap = await GitHubSnapshot.load(client, repo);
     expect(dec(await readEntry(snap, 'team/new/thing', [alice.priv]))).toBe('hunter2');
     expect(dec(await readEntry(snap, 'team/old.gpg', [alice.priv]))).toBe('old');
+    // companions are encrypted to the same set in the same commit
+    const before = gh.commits.size;
+    await writeEntry({
+      snapshot: snap,
+      writer,
+      entry: 'team/rotated',
+      plaintext: enc('v2'),
+      companions: [{ path: 'team/.g00pass-rotation.gpg', plaintext: enc('{"x":1}') }],
+    });
+    expect(gh.commits.size).toBe(before + 1);
+    expect(await decryptText(gh.filesAt('main').get('team/.g00pass-rotation.gpg')!, alice)).toBe('{"x":1}');
+    const snap2 = await GitHubSnapshot.load(client, repo);
+    await expect(
+      writeEntry({ snapshot: snap2, writer, entry: 'team/x', plaintext: enc('x'), companions: [{ path: 'elsewhere', plaintext: enc('y') }] }),
+    ).rejects.toThrow(/not governed/);
     // root .gpg-id recipient has no public key -> cannot write at root
     await expect(writeEntry({ snapshot: snap, writer, entry: 'rootlevel', plaintext: enc('x') })).rejects.toThrow(/no public key/);
   });

@@ -106,6 +106,10 @@ export async function commitChanges(
       } catch {
         /* ignore */
       }
+      // Only a moved branch is a (retryable) conflict. If the head is still
+      // our base, the update was refused for another reason (e.g. branch
+      // protection) and retrying would not help.
+      if (actual === opts.baseSha) throw e;
       throw new ConflictError(opts.baseSha, actual);
     }
     throw e;

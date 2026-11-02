@@ -4,6 +4,7 @@ import {
   GitHubSnapshot,
   TokenStore,
   getTrustHook,
+  isHiddenEntry,
   listEntries,
   readEntry,
   unlockPrivateKey,
@@ -172,7 +173,7 @@ export function mountApp(root: HTMLElement): void {
     clear(list);
     if (!snapshot) return;
     const q = filter.value.trim().toLowerCase();
-    for (const p of listEntries(snapshot)) {
+    for (const p of listEntries(snapshot).filter((e) => !isHiddenEntry(e))) {
       const name = p.slice(0, -4);
       if (q && !name.toLowerCase().includes(q)) continue;
       list.append(h('li', {}, h('button', { class: 'link', onclick: () => void openEntry(p) }, name)));
@@ -184,7 +185,7 @@ export function mountApp(root: HTMLElement): void {
     setStatus('Loading…');
     try {
       snapshot = await GitHubSnapshot.load(client, config);
-      setStatus(`Loaded ${listEntries(snapshot).length} entries at ${snapshot.commitSha.slice(0, 7)}.`);
+      setStatus(`Loaded ${listEntries(snapshot).filter((e) => !isHiddenEntry(e)).length} entries at ${snapshot.commitSha.slice(0, 7)}.`);
       renderList();
     } catch (e) {
       snapshot = null;

@@ -2,7 +2,8 @@ import type { PrivateKey } from 'openpgp';
 import { decryptEntry } from './crypto/decrypt';
 import { encryptToVerified } from './crypto/encrypt';
 import { G00passError } from './errors';
-import { entryFile } from './paths';
+import { findGpgIdForEntry } from './gpgid';
+import { entryFile, normalizePath } from './paths';
 import type { CommitResult, StoreSnapshot, StoreWriter } from './store';
 import { verifyRecipients } from './trust';
 
@@ -25,6 +26,12 @@ export interface WriteEntryOptions {
   /** Entry name ("a/b") or file ("a/b.gpg"). */
   entry: string;
   plaintext: Uint8Array;
+  /**
+   * Other encrypted files for the SAME commit (e.g. the folder's
+   * `.g00pass-rotation.gpg`). Each must be governed by the same `.gpg-id`
+   * as the entry; they are encrypted to the same verified set.
+   */
+  companions?: readonly { path: string; plaintext: Uint8Array }[];
   message?: string;
   armor?: boolean;
   signal?: AbortSignal;
@@ -47,8 +54,17 @@ export interface WriteEntryResult extends CommitResult {
 export async function writeEntry(opts: WriteEntryOptions): Promise<WriteEntryResult> {
   const path = entryFile(opts.entry);
   const verified = await verifyRecipients(opts.snapshot, { entry: path }, { signal: opts.signal });
-  const ct = await encryptToVerified(opts.plaintext, verified, { armor: opts.armor });
-  const res = await opts.writer.commit([{ path, content: ct }], {
+  const changes = [{ path, content: await encryptToVerified(opts.plaintext, verified, { armor: opts.armor }) }];
+  const has = (p: string) => opts.snapshot.hasFile(p);
+  for (const c of opts.companions ?? []) {
+    const cp = entryFile(normalizePath(c.path));
+    if (cp === path || changes.some((x) => x.path === cp)) throw new G00passError(`Duplicate path "${cp}"`);
+    if (findGpgIdForEntry(has, cp) !== verified.gpgIdPath) {
+      throw new G00passError(`Companion "${cp}" is not governed by ${verified.gpgIdPath}`);
+    }
+    changes.push({ path: cp, content: await encryptToVerified(c.plaintext, verified, { armor: opts.armor }) });
+  }
+  const res = await opts.writer.commit(changes, {
     baseSha: opts.snapshot.commitSha,
     message: opts.message ?? `g00pass: update ${path}`,
     signal: opts.signal,
