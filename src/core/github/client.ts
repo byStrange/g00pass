@@ -16,6 +16,11 @@ export interface GitHubRepo {
   branch: string;
   /** Sub-directory of the repo that is the store root ("" = repo root). */
   storeRoot?: string;
+  /**
+   * Private "owner/name" repo that receives access-request issues. Unset =
+   * fall back to the store repo (not recommended: see access-requests.md).
+   */
+  requestsRepo?: string;
 }
 
 export interface GitHubClientOptions {
@@ -89,5 +94,25 @@ export class GitHubClient {
       throw new GitHubApiError(res.status, redactSecrets(msg).slice(0, 300), ra ? Number(ra) : undefined);
     }
     return (text ? JSON.parse(text) : undefined) as T;
+  }
+
+  /** Create an issue. Returns only the fields callers need. */
+  async createIssue(
+    r: { owner: string; repo: string },
+    issue: { title: string; body: string; labels?: string[] },
+    signal?: AbortSignal,
+  ): Promise<{ number: number; html_url: string; labels: string[] }> {
+    validateRepo({ ...r, branch: 'main' });
+    const res = await this.request<{ number: number; html_url: string; labels?: Array<string | { name?: string }> }>(
+      'POST',
+      repoPath({ ...r, branch: 'main' }, '/issues'),
+      issue,
+      signal,
+    );
+    return {
+      number: res.number,
+      html_url: res.html_url,
+      labels: (res.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? ''))),
+    };
   }
 }

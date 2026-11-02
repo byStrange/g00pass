@@ -26,3 +26,13 @@ hosts that support it (Netlify, Cloudflare Pages).
 *Contents: Read-only*. It stays in memory, or in sessionStorage if you opt in.
 See [access-requests.md](docs/specs/access-requests.md#token-scopes-per-role)
 for other roles.
+
+**Access requests:** new users generate a key in the browser (v4 curve25519,
+iterated-S2K passphrase protection, stored passphrase-encrypted on the device)
+and post a signed request as an issue. Set **Requests repo** (`owner/name`) in
+the settings to a *separate private repo*: a token with Issues access can read
+every issue in its repo, so do not share the store repo with requesters. If it
+is unset the app falls back to the store repo and shows a warning. Requesters
+need only a fine-grained PAT with *Issues: Read and write* on the requests
+repo; the request token is kept in memory only. Always confirm the requester's
+fingerprint out of band before approving.

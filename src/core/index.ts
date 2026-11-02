@@ -13,3 +13,15 @@ export * from './token';
 export * from './github/client';
 export { GitHubSnapshot, getBranchHead, base64ToBytes, bytesToBase64 } from './github/snapshot';
 export { commitChanges, GitHubWriter, withConflictRetry, type CommitOptions } from './github/commit';
+export * from './requests/keygen';
+export {
+  buildAccessRequest,
+  groupFingerprint,
+  REQUEST_LABEL,
+  REQUEST_ROLES,
+  RequestBuildError,
+  type AccessRequestInput,
+  type BuiltAccessRequest,
+  type RequestRole,
+} from './requests/build';
+export * from './requests/submit';
