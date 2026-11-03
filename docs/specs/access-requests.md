@@ -195,7 +195,7 @@ each time):
 reencryptFolder(folder, [...currentNonEscrowLines, fingerprint], {
   snapshot, writer, decryptionKeys: [operatorKey],
   pendingKeys: new Map([[fingerprint, publicKey]]),        // -> .public-keys/<FPR>
-  gpgIdSignature: (text) => signDetached(text, operatorKey),
+  gpgIdSignature: (text) => signGpgId(text, folder, operatorKey), // folder-bound notation (gpg-id-signatures.md)
   replaceEntries: [rotationFileWithMemberAdded],         // rotation.md
   extraChanges: [
     ...(role === 'folder-admin' ? adminsFileUpdate : []),  // folder-admins.md, signed

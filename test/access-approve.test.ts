@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import * as openpgp from 'openpgp';
 import {
   ApprovalError,
@@ -7,7 +7,12 @@ import {
   approveAccessRequest,
   buildInbox,
   changeFolderRecipients,
-  isFolderAdmin,
+  checkFolderAdmin,
+  isVerifiedFolderAdmin,
+  pinAnchors,
+  resetTrustEnvironment,
+  signatureTrustHook,
+  verifyRecipients,
   parseAccessRequest,
   passThroughTrustHook,
   setTrustHook,
@@ -17,6 +22,7 @@ import {
 } from '../src/core';
 import { type TestIdentity, dec, decryptText, encryptForTest, makeIdentity } from './helpers/keys';
 import { buildBody } from './helpers/requests';
+import { STORE_ID, adminsFiles, derive, freshEnv, signedGpgId } from './helpers/trust';
 
 let alice: TestIdentity, bob: TestIdentity, carol: TestIdentity, dave: TestIdentity, escrow: TestIdentity;
 let store: MemoryStore;
@@ -25,16 +31,28 @@ const secrets: Record<string, string> = { 'team/db.gpg': 'db-pass', 'team/api/to
 const ctx = { repo: 'acme/secrets', storeRoot: '' };
 
 beforeAll(async () => {
-  [alice, bob, carol, dave, escrow] = (await Promise.all(['Alice', 'Bob', 'Carol', 'Dave', 'Escrow'].map(makeIdentity))) as [
+  // Keys are back-dated so signatures made "now" are valid under the signer-valid-now rule.
+  const born = new Date(Date.now() - 2 * 86400_000);
+  [alice, bob, carol, dave, escrow] = (await Promise.all(['Alice', 'Bob', 'Carol', 'Dave', 'Escrow'].map((n) => makeIdentity(n, born)))) as [
     TestIdentity, TestIdentity, TestIdentity, TestIdentity, TestIdentity,
   ];
 });
 
+afterEach(() => {
+  setTrustHook(passThroughTrustHook);
+  resetTrustEnvironment();
+});
+
 beforeEach(async () => {
   setTrustHook(passThroughTrustHook);
+  freshEnv();
+  // Alice is the pinned global admin (trust anchor); root and team/.gpg-id carry her folder-bound signatures.
+  pinAnchors(STORE_ID, [alice.fpr], 'first-use');
+  const rootText = `${alice.fpr}\n${escrow.fpr} # g00pass:escrow\n`;
+  const teamText = `${alice.fpr}\n${carol.fpr}\n${escrow.fpr} # g00pass:escrow\n`;
   store = new MemoryStore({
-    '.gpg-id': `${alice.fpr}\n${escrow.fpr} # g00pass:escrow\n`,
-    'team/.gpg-id': `${alice.fpr}\n${carol.fpr}\n${escrow.fpr} # g00pass:escrow\n`,
+    ...(await signedGpgId('', rootText, alice.priv)),
+    ...(await signedGpgId('team', teamText, alice.priv)),
     ...Object.fromEntries([alice, carol, escrow, dave].map((i) => [`.public-keys/${i.fpr}`, i.armoredPublic])),
   });
   store.set('team/db.gpg', await encryptForTest(secrets['team/db.gpg']!, [alice, carol, escrow]));
@@ -143,10 +161,10 @@ describe('approveAccessRequest', () => {
     expect(writer.commits).toHaveLength(0);
   });
 
-  it('makes a folder admin when listed in the admins file; folder-admin role writes a signed admins file', async () => {
-    store.set('team/.g00pass-admins.json', JSON.stringify({ admins: [carol.fpr], folder: 'team', serial: 1, type: 'g00pass.folder-admins', version: 1 }));
+  it('makes a folder admin when listed in a verified admins file; folder-admin role writes a signed admins file', async () => {
+    for (const [p, c] of Object.entries(await adminsFiles(store, 'team', [carol.fpr], alice.priv))) store.set(p, c);
     const req = await request(bob);
-    // carol (folder admin via file, and a recipient) may approve; the operator key must decrypt
+    // carol (folder admin via signed file, and a recipient) may approve; the operator key must decrypt
     await approveAccessRequest(req, approveOpts(req, { operatorKey: carol.priv }));
     expect(writer.commits).toHaveLength(1);
 
@@ -156,6 +174,14 @@ describe('approveAccessRequest', () => {
     expect(file).toMatchObject({ admins: [carol.fpr, dave.fpr].sort(), serial: 2, updatedBy: alice.fpr, folder: 'team' });
     expect(file.previous).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(await store.readFile('team/.g00pass-admins.json.sig')).not.toBeNull();
+    expect(await isVerifiedFolderAdmin(store, 'team', dave.fpr)).toBe(true);
+  });
+
+  it('refuses when the root is not trusted (no pinned anchors), even for a recipient anchor', async () => {
+    pinAnchors(STORE_ID, [dave.fpr], 'manual');
+    const req = await request(bob);
+    await expect(approveAccessRequest(req, approveOpts(req))).rejects.toMatchObject({ code: 'not-admin' });
+    expect(writer.commits).toHaveLength(0);
   });
 
   it('a global admin who is not a recipient cannot approve', async () => {
@@ -210,20 +236,53 @@ describe('changeFolderRecipients (shared with remove-member)', () => {
   });
 });
 
-describe('isFolderAdmin (fail-closed placeholder)', () => {
-  it('missing admins file: only global admins', async () => {
-    expect(await isFolderAdmin(store, 'team', alice.fpr)).toBe(true);
-    expect(await isFolderAdmin(store, 'team', carol.fpr)).toBe(false);
-    expect(await isFolderAdmin(store, 'team', escrow.fpr)).toBe(false); // escrow is not a global admin
+describe('verified folder admin check', () => {
+  it('without an admins file only anchors are admins; escrow never', async () => {
+    expect(await isVerifiedFolderAdmin(store, 'team', alice.fpr)).toBe(true);
+    expect(await isVerifiedFolderAdmin(store, 'team', carol.fpr)).toBe(false);
+    expect(await isVerifiedFolderAdmin(store, 'team', escrow.fpr)).toBe(false);
+    expect((await checkFolderAdmin(store, 'team', carol.fpr)).reason).toMatch(/not a verified admin/);
   });
-  it('reads the nearest admins file; invalid or foreign-folder files grant nothing', async () => {
-    store.set('team/.g00pass-admins.json', JSON.stringify({ admins: [carol.fpr], folder: 'team', type: 'g00pass.folder-admins', version: 1 }));
-    expect(await isFolderAdmin(store, 'team', carol.fpr)).toBe(true);
-    expect(await isFolderAdmin(store, 'team/api', carol.fpr)).toBe(true);
-    store.set('team/.g00pass-admins.json', JSON.stringify({ admins: [carol.fpr], folder: 'other', type: 'g00pass.folder-admins', version: 1 }));
-    expect(await isFolderAdmin(store, 'team', carol.fpr)).toBe(false);
-    store.set('team/.g00pass-admins.json', '{not json');
-    expect(await isFolderAdmin(store, 'team', carol.fpr)).toBe(false);
+  it('grants via a signed admins file (inherited); unsigned or garbage files grant nothing', async () => {
+    const files = await adminsFiles(store, 'team', [carol.fpr], alice.priv);
+    const signed = await derive(store, files); // new commit sha per state (verification is cached per commit)
+    expect(await isVerifiedFolderAdmin(signed, 'team', carol.fpr)).toBe(true);
+    expect(await isVerifiedFolderAdmin(signed, 'team/api', carol.fpr)).toBe(true);
+    const unsigned = await derive(signed, { 'team/.g00pass-admins.json.sig': null });
+    expect(await isVerifiedFolderAdmin(unsigned, 'team', carol.fpr)).toBe(false);
+    const garbage = await derive(signed, { 'team/.g00pass-admins.json': '{not json' });
+    expect(await isVerifiedFolderAdmin(garbage, 'team', carol.fpr)).toBe(false);
+  });
+});
+
+describe('approval with the REAL signatureTrustHook', () => {
+  it('anchor-signed root + folder admin approves; the commit passes verifyRecipients', async () => {
+    setTrustHook(signatureTrustHook);
+    for (const [p, c] of Object.entries(await adminsFiles(store, 'team', [carol.fpr], alice.priv))) store.set(p, c);
+    const req = await request(bob);
+    // carol is a folder admin (signed file) and a recipient; her .gpg-id signature must verify.
+    const res = await approveAccessRequest(req, approveOpts(req, { operatorKey: carol.priv }));
+    expect(writer.commits).toHaveLength(1);
+    expect(res.commitSha).toBe(store.commitSha);
+    expect(dec((await store.readFile('team/.gpg-id'))!)).toContain(bob.fpr);
+    const v = await verifyRecipients(store, { folder: 'team' });
+    expect(v.hook).toBe('gpg-id signatures v1');
+    expect(v.fingerprints).toContain(bob.fpr);
+    expect(await decryptText((await store.readFile('team/db.gpg'))!, bob)).toBe('db-pass');
+  });
+
+  it('a folder-admin approval writes an admins file the verifier accepts', async () => {
+    setTrustHook(signatureTrustHook);
+    const req = await request(dave, { role: 'folder-admin' });
+    await approveAccessRequest(req, approveOpts(req));
+    expect(await isVerifiedFolderAdmin(store, 'team', dave.fpr)).toBe(true);
+  });
+
+  it('refuses a non-admin recipient before anything is written', async () => {
+    setTrustHook(signatureTrustHook);
+    const req = await request(bob);
+    await expect(approveAccessRequest(req, approveOpts(req, { operatorKey: carol.priv }))).rejects.toMatchObject({ code: 'not-admin' });
+    expect(writer.commits).toHaveLength(0);
   });
 });
 
@@ -251,6 +310,7 @@ describe('buildInbox', () => {
     });
     expect(inbox.actionable.map((i) => i.issue.number)).toEqual([1]);
     expect(inbox.hidden).toBe(1);
+    expect(inbox.hiddenReasons.map((r) => r.issue.number)).toEqual([2]);
     expect(inbox.invalid.map((i) => [i.issue.number, i.code])).toEqual([
       [3, 'bad-signature'],
       [5, 'already-recipient'],
