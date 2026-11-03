@@ -16,6 +16,7 @@ import { h, clear } from './dom';
 import { deviceKeyInfo, forgetDeviceKey, loadDeviceKeyArmored, saveDeviceKey } from './keystore';
 import { createEnrollment } from './enroll';
 import { mountInbox } from './inbox';
+import { mountFolders } from './folders';
 import { acknowledgeOriginRisk, assessOrigin, isOriginRiskAcknowledged } from './origin';
 import { Session, copyWithAutoClear } from './session';
 import { createTrustPanel } from './trust';
@@ -246,6 +247,7 @@ function mountAppUnguarded(root: HTMLElement): void {
       snapshot = await GitHubSnapshot.load(client, config);
       setStatus(`Loaded ${listEntries(snapshot).filter((e) => !isHiddenEntry(e)).length} entries at ${snapshot.commitSha.slice(0, 7)}.`);
       renderList();
+      folders.refresh();
       await trust.refresh(snapshot, config).catch(() => setStatus('Could not evaluate recipient trust; treat this store as unverified.', true));
     } catch (e) {
       snapshot = null;
@@ -314,6 +316,16 @@ function mountAppUnguarded(root: HTMLElement): void {
     onApproved: () => void refresh(),
   });
 
+  // ----- folder administration (remove member, rotation, sub-folders) -----
+  const folders = mountFolders({
+    client,
+    getConfig: () => config,
+    getSnapshot: () => snapshot,
+    session,
+    setStatus,
+    onChanged: () => void refresh(),
+  });
+
   // ----- layout -----
   const header = h(
     'header',
@@ -321,13 +333,13 @@ function mountAppUnguarded(root: HTMLElement): void {
     h('h1', {}, 'g00pass'),
     h('span', { class: 'version', title: 'Build version and commit' }, `v${__APP_VERSION__} · ${__APP_COMMIT__}`),
   );
-  const footer = h('footer', {}, `Trust policy: ${getTrustHook().name} (recipient lists verified per folder, see Recipient trust). Read-only client; nothing leaves this browser except GitHub API calls.`);
+  const footer = h('footer', {}, `Trust policy: ${getTrustHook().name} (recipient lists verified per folder, see Recipient trust). Nothing leaves this browser except GitHub API calls.`);
 
   function render() {
     void renderKeyCard();
   }
 
-  root.append(header, status, configForm, trust.card, keyCard, enroll.el, entriesCard, inbox.el, entryView, trust.settings, footer);
+  root.append(header, status, configForm, trust.card, keyCard, enroll.el, entriesCard, entryView, inbox.el, folders.el, trust.settings, footer);
   render();
   if (tokens.hasToken) void refresh();
 }
