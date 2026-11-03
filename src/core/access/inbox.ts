@@ -5,12 +5,16 @@ import type { StoreSnapshot } from '../store';
 import { checkFolderAdmin } from '../admins';
 import { isFolderRecipient } from './folders';
 import { type RecipientChangePlan, RecipientChangeError, planFolderRecipientChange } from './recipients';
+import { approvalChange } from './approve';
+import { type InviteRecordStatus, verifyInviteRecord } from '../invites';
 
 export interface InboxItem {
   issue: IssueSummary;
   request: ParsedAccessRequest;
   /** The exact before → after recipient change, computed on the inbox snapshot (show it; approve its digest). */
   plan: RecipientChangePlan;
+  /** Invite record check (null: the request names no invite). Re-checked on the commit snapshot. */
+  invite: InviteRecordStatus | null;
 }
 /** Valid request, operator is an admin recipient, but the folder must not be re-signed as it is. */
 export interface BlockedInboxItem {
@@ -68,8 +72,9 @@ export async function buildInbox(opts: {
       const admin = await checkFolderAdmin(snapshot, req.folder, operatorFingerprint);
       if (recipient && admin.admin) {
         try {
-          const plan = await planFolderRecipientChange(snapshot, req.folder, { add: [{ fingerprint: req.fingerprint, publicKey: req.publicKey }] }, { operatorFingerprint });
-          inbox.actionable.push({ issue, request: req, plan });
+          const plan = await planFolderRecipientChange(snapshot, req.folder, approvalChange(req), { operatorFingerprint });
+          const invite = req.inviteId ? await verifyInviteRecord(snapshot, req.inviteId, { folder: req.folder, role: req.role, now: opts.now }) : null;
+          inbox.actionable.push({ issue, request: req, plan, invite });
         } catch (e) {
           if (!(e instanceof RecipientChangeError)) throw e;
           inbox.blocked.push({ issue, request: req, code: e.code, reason: e.message });

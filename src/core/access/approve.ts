@@ -18,6 +18,7 @@ import { joinPath } from '../paths';
 import { GPG_ID } from '../paths';
 import { checkFolderAdmin } from '../admins';
 import { recordMemberAdded } from '../rotation';
+import { consumeInviteChanges, verifyInviteRecord } from '../invites';
 import { trustEnvironment } from '../trust-env';
 import { isFolderRecipient } from './folders';
 import { type RecipientChange, type RecipientChangePlan, RecipientChangeError, changeFolderRecipients, planFolderRecipientChange } from './recipients';
@@ -54,7 +55,7 @@ export interface ApprovalConfirmation {
    * ignored). Must match the request's fingerprint.
    */
   fingerprintSuffix: string;
-  /** Extra confirmation for requests whose invite could not be verified (always, until invites ship). */
+  /** Extra confirmation, required when the request names no VALID invite record (verified on the commit snapshot). */
   acknowledgeUninvited?: boolean;
   /** `digest` of the RecipientChangePlan (before → after) the operator reviewed (previewApproval). */
   approvedPlan: string;
@@ -77,8 +78,6 @@ export interface ApproveOptions {
   confirmation: ApprovalConfirmation;
   /** e.g. `acme/requests#12`, used in the commit message. */
   requestRef: string;
-  /** Set once invite records are verified (Phase 2); until then approving always needs the extra acknowledgement. */
-  inviteVerified?: boolean;
   armor?: boolean;
   onProgress?: (p: ReencryptProgress) => void;
   onConflict?: (attempt: number) => void;
@@ -90,10 +89,12 @@ export interface ApprovalResult {
   commitSha: string;
   operatorFingerprint: string;
   result: ReencryptResult;
+  /** True when a valid invite record was consumed by the approval commit. */
+  inviteConsumed: boolean;
 }
 
-/** The recipient change an approval makes (preview and commit MUST use the same). */
-function approvalChange(req: ParsedAccessRequest): RecipientChange {
+/** The recipient change an approval makes (preview, inbox and commit MUST use the same). */
+export function approvalChange(req: ParsedAccessRequest): RecipientChange {
   return {
     add: [{ fingerprint: req.fingerprint, publicKey: req.publicKey }],
     admins: req.role === 'folder-admin' ? { add: [req.fingerprint] } : undefined,
@@ -154,16 +155,21 @@ export async function approveAccessRequest(req: ParsedAccessRequest, opts: Appro
   if (typeof opts.confirmation.approvedPlan !== 'string' || !opts.confirmation.approvedPlan) {
     throw new ApprovalError('plan-changed', 'Review the recipient change before approving');
   }
-  if ((req.inviteId === null || !opts.inviteVerified) && opts.confirmation.acknowledgeUninvited !== true) {
-    throw new ApprovalError('invite-not-acknowledged', 'This request has no verified invite; explicit acknowledgement required');
-  }
   const operatorFingerprint = fingerprintOf(opts.operatorKey);
 
+  let inviteConsumed = false;
   const result = await withConflictRetry(
     async () => {
       const snapshot = await opts.loadSnapshot(opts.signal);
       await assertCanApprove(snapshot, req, operatorFingerprint);
       const now = opts.now ?? trustEnvironment().now();
+      // Invite: verified on THIS snapshot; a valid record is consumed in the same commit.
+      const invite = req.inviteId ? await verifyInviteRecord(snapshot, req.inviteId, { folder: req.folder, role: req.role, now }, opts.signal) : null;
+      if (!invite?.valid && opts.confirmation.acknowledgeUninvited !== true) {
+        throw new ApprovalError('invite-not-acknowledged', `This request has no verified invite${invite && !invite.valid ? ` (${invite.reason})` : ''}; explicit acknowledgement required`);
+      }
+      const consume = invite?.valid ? consumeInviteChanges(snapshot, req.inviteId!) : [];
+      inviteConsumed = consume.length > 0;
       return changeFolderRecipients(
         req.folder,
         approvalChange(req),
@@ -172,6 +178,7 @@ export async function approveAccessRequest(req: ParsedAccessRequest, opts: Appro
           writer: opts.writer,
           operatorKey: opts.operatorKey,
           now,
+          extraChanges: consume,
           rotation: (doc) => recordMemberAdded(doc, { fingerprint: req.fingerprint, name: req.name, addedBy: operatorFingerprint, request: opts.requestRef }, now),
           approvedPlanDigest: opts.confirmation.approvedPlan,
           armor: opts.armor,
@@ -183,7 +190,7 @@ export async function approveAccessRequest(req: ParsedAccessRequest, opts: Appro
     },
     { signal: opts.signal, onConflict: (_e, n) => opts.onConflict?.(n) },
   );
-  return { commitSha: result.commitSha, operatorFingerprint, result };
+  return { commitSha: result.commitSha, operatorFingerprint, result, inviteConsumed };
 }
 
 /** Best-effort follow-up after the commit succeeded; returns the steps that failed (the commit is the source of truth). */

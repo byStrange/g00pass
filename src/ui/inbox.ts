@@ -124,7 +124,8 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
     }
   }
 
-  function renderItem({ issue, request: r, plan }: InboxItem, issueRepo: IssueRepo): HTMLElement {
+  function renderItem({ issue, request: r, plan, invite }: InboxItem, issueRepo: IssueRepo): HTMLElement {
+    const invited = invite?.valid === true;
     const suffix = h('input', {
       autocomplete: 'off',
       spellcheck: 'false',
@@ -140,7 +141,7 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
     const denyBtn = h('button', { type: 'button', class: 'danger' }, 'Deny');
     const reason = h('input', { placeholder: 'Reason for denying (optional)', maxlength: '500', autocomplete: 'off' });
     const progress = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' });
-    const ready = () => suffix.value.replace(/\s+/g, '').length === FINGERPRINT_SUFFIX_LENGTH && reviewed.checked && ack.checked;
+    const ready = () => suffix.value.replace(/\s+/g, '').length === FINGERPRINT_SUFFIX_LENGTH && reviewed.checked && (invited || ack.checked);
     const sync = () => {
       approveBtn.disabled = !ready();
     };
@@ -184,7 +185,7 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
         deps.setStatus(
           `Approved in ${res.commitSha.slice(0, 7)}.` +
             (failed.length ? ` Could not update the issue (${failed.join(', ')}); close it manually.` : '') +
-            (r.inviteId ? ' Now revoke the invite token on GitHub.' : ''),
+            (res.inviteConsumed ? ' The invite was used up. Now revoke the invite token on GitHub.' : r.inviteId ? ' Revoke the invite token on GitHub.' : ''),
           failed.length > 0,
         );
         card.remove();
@@ -221,12 +222,14 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
       h('p', { class: 'fpr mono', dir: 'ltr', 'aria-label': 'Full fingerprint' }, formatFingerprint(r.fingerprint)),
       h('p', {}, `Folder: ${r.folder}  ·  Role: ${r.role}`),
       h('p', {}, h('span', { class: 'badge ok' }, 'Signature valid'), ' ', h('span', { class: 'hint' }, 'proves the requester holds this key, not who they are')),
-      h('p', {}, h('span', { class: 'badge warn' }, r.inviteId ? 'Invite not verified' : 'Uninvited')),
+      h('p', {}, invited
+        ? h('span', { class: 'badge ok' }, `Invited (${invite.record.role}, by ${invite.record.issuedBy.slice(-16)}, expires ${invite.record.expiresAt})`)
+        : h('span', { class: 'badge warn' }, r.inviteId ? `Invite not valid: ${invite && !invite.valid ? invite.reason : 'unknown'}` : 'Uninvited')),
       r.note ? h('pre', { class: 'details', dir: 'auto' }, r.note) : null,
       renderPlan(plan),
       h('label', {}, `Ask ${r.name} for their fingerprint through another channel (not this issue) and type its LAST ${FINGERPRINT_SUFFIX_LENGTH} characters:`, suffix),
       h('label', { class: 'inline' }, reviewed, 'I reviewed the recipient change above (before → after) and approve exactly that.'),
-      h('label', { class: 'inline' }, ack, 'I understand this request has no verified invite.'),
+      invited ? '' : h('label', { class: 'inline' }, ack, 'I understand this request has no verified invite.'),
       h('div', { class: 'row' }, approveBtn, cancelBtn),
       progress,
       h('div', { class: 'row' }, reason, denyBtn),

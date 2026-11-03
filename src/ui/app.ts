@@ -4,6 +4,12 @@ import {
   GitHubSnapshot,
   TokenStore,
   getTrustHook,
+  getPinnedAnchors,
+  formatFingerprint,
+  pinAnchors,
+  takeInviteFromLocation,
+  type Invite,
+  type TakenInvite,
   inspectImportedKey,
   isHiddenEntry,
   listEntries,
@@ -71,10 +77,13 @@ function originGate(root: HTMLElement): Promise<void> {
 }
 
 export function mountApp(root: HTMLElement): void {
-  void originGate(root).then(() => mountAppUnguarded(root));
+  // FIRST: an invite link carries a token in the fragment; strip it from the
+  // address bar and history before anything else (even the origin warning).
+  const invite = takeInviteFromLocation(location, history);
+  void originGate(root).then(() => mountAppUnguarded(root, invite));
 }
 
-function mountAppUnguarded(root: HTMLElement): void {
+function mountAppUnguarded(root: HTMLElement, invite: TakenInvite): void {
   const tokens = new TokenStore('session');
   let config = loadConfig();
   let snapshot: GitHubSnapshot | null = null;
@@ -326,6 +335,44 @@ function mountAppUnguarded(root: HTMLElement): void {
     onChanged: () => void refresh(),
   });
 
+  // ----- invite link (newcomer) -----
+  function inviteCard(inv: Invite): HTMLElement {
+    const [owner, repo] = inv.repo.split('/') as [string, string];
+    const store = { owner, repo, storeRoot: inv.storeRoot };
+    const pinned = getPinnedAnchors(store);
+    const differs = !!pinned && (pinned.anchors.length !== inv.anchors.length || pinned.anchors.some((a) => !inv.anchors.includes(a)));
+    const ok = h('input', { type: 'checkbox' });
+    const btn = h('button', { type: 'button', class: 'primary', disabled: true }, 'Accept invite');
+    ok.addEventListener('change', () => (btn.disabled = !ok.checked));
+    const card = h(
+      'section',
+      { class: 'card invite' },
+      h('h2', {}, 'You were invited'),
+      h('p', {}, `Store ${inv.repo}${inv.storeRoot ? ` (folder ${inv.storeRoot})` : ''}, branch ${inv.branch}. Access requested for ${inv.folder}/ as ${inv.role}. Requests go to ${inv.requestsRepo}. Expires ${inv.expiresAt}.`),
+      h('p', {}, 'The invite names these global admins (trust anchors). Compare EVERY fingerprint with what your admin told you through another channel before accepting: they decide whom this device trusts.'),
+      h('ul', { class: 'fprs' }, ...inv.anchors.map((a) => h('li', { class: 'mono' }, formatFingerprint(a)))),
+      differs ? h('p', { class: 'banner danger', role: 'alert' }, 'This device already pinned DIFFERENT global admins for this store. Accepting replaces them. Only continue if your admin confirms the change in person.') : '',
+      h('label', { class: 'inline' }, ok, 'I compared these fingerprints with my admin and they match.'),
+      h('p', { class: 'hint' }, 'The invite token is kept in memory only (this tab) and can only file your access request.'),
+      btn,
+    );
+    btn.addEventListener('click', () => {
+      if (!ok.checked) return;
+      pinAnchors(store, inv.anchors, 'invite');
+      config = { owner, repo, branch: inv.branch, storeRoot: inv.storeRoot, requestsRepo: inv.requestsRepo };
+      localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+      f.owner.value = owner;
+      f.repo.value = repo;
+      f.branch.value = inv.branch;
+      f.storeRoot.value = inv.storeRoot;
+      f.requestsRepo.value = inv.requestsRepo;
+      enroll.applyPrefill({ folder: inv.folder, role: inv.role, inviteId: inv.id, requestsRepo: inv.requestsRepo, token: inv.token });
+      card.remove();
+      setStatus('Invite accepted: global admins pinned. Create your key below and submit the access request.');
+    });
+    return card;
+  }
+
   // ----- layout -----
   const header = h(
     'header',
@@ -339,7 +386,9 @@ function mountAppUnguarded(root: HTMLElement): void {
     void renderKeyCard();
   }
 
-  root.append(header, status, configForm, trust.card, keyCard, enroll.el, entriesCard, entryView, inbox.el, folders.el, trust.settings, footer);
+  const inviteEl = invite.kind === 'invite' ? inviteCard(invite.invite) : null;
+  if (invite.kind === 'invalid') setStatus(`Invite link not usable: ${invite.reason}`, true);
+  root.append(header, status, ...(inviteEl ? [inviteEl] : []), configForm, trust.card, keyCard, enroll.el, entriesCard, entryView, inbox.el, folders.el, trust.settings, footer);
   render();
   if (tokens.hasToken) void refresh();
 }

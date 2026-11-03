@@ -1,6 +1,11 @@
 import {
   G00passError,
+  GitHubClient,
   GitHubSnapshot,
+  MAX_INVITE_DAYS,
+  issueInvite,
+  probeInviteToken,
+  type RequestRole,
   GitHubWriter,
   commitMarkRotated,
   createSubfolder,
@@ -20,14 +25,13 @@ import {
   removeSubfolder,
   rotationChecklist,
   sanitizeDisplayText,
-  type GitHubClient,
   type GitHubRepo,
   type MemberChecklist,
   type StoreSnapshot,
 } from '../core';
 import { clear, h } from './dom';
 import { fprList, renderPlan } from './plan';
-import type { Session } from './session';
+import { type Session, copyWithAutoClear } from './session';
 
 export interface FoldersDeps {
   client: GitHubClient;
@@ -241,6 +245,9 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
     });
     body.append(createForm);
 
+    // ---- invite ----
+    body.append(inviteForm(folder));
+
     // ---- remove sub-folder (merge into parent) ----
     if (folder !== '') {
       const rmBtn = h('button', { type: 'button', class: 'danger', disabled: !key }, 'Review removal…');
@@ -277,6 +284,72 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
       });
       body.append(rmForm);
     }
+  }
+
+  /** Issue an invite (access-requests.md §Admin client): token check, signed record, link shown once. */
+  function inviteForm(folder: string): HTMLElement {
+    const role = h('select', {}, h('option', { value: 'reader' }, 'reader'), h('option', { value: 'folder-admin' }, 'folder-admin'));
+    const days = h('input', { type: 'number', min: '1', max: String(MAX_INVITE_DAYS), value: '7' });
+    const note = h('input', { maxlength: '500', autocomplete: 'off', placeholder: 'Note for the record (optional, not secret)' });
+    const token = h('input', { type: 'password', autocomplete: 'off', placeholder: 'github_pat_… (Issues: Read and write on the requests repo ONLY)' });
+    const out = h('div', {});
+    const btn = h('button', { type: 'button' }, 'Check token & create invite');
+    const cfg = deps.getConfig();
+    const requestsRepo = cfg.requestsRepo?.trim() || `${cfg.owner}/${cfg.repo}`;
+    btn.addEventListener('click', async () => {
+      const k = deps.session.unlockedKey;
+      const t = token.value.trim();
+      token.value = '';
+      if (!k) return deps.setStatus('Unlock your key first.', true);
+      if (!t) return deps.setStatus('Paste the requester token first.', true);
+      clear(out);
+      try {
+        const probe = await probeInviteToken(new GitHubClient({ token: () => t }), deps.getConfig());
+        if (!probe.ok) return deps.setStatus(`Token refused: ${probe.reason}`, true);
+        const inv = await issueInvite({
+          snapshot: await fresh(),
+          writer: writer(),
+          repo: deps.getConfig(),
+          folder,
+          role: role.value as RequestRole,
+          days: Number(days.value),
+          note: note.value,
+          token: t,
+          appUrl: location.origin + location.pathname,
+          operatorKey: k,
+        });
+        const link = h('textarea', { rows: '3', readonly: true, spellcheck: 'false' });
+        link.value = inv.link;
+        out.append(
+          h('p', { class: 'banner warn' }, 'This link CONTAINS A CREDENTIAL (the requester token). Send it only through a channel you trust, then close this view. It is not stored anywhere.'),
+          link,
+          h('div', { class: 'row' },
+            h('button', { type: 'button', onclick: () => void copyWithAutoClear(inv.link, 60_000, () => deps.setStatus('Clipboard cleared.')).then(() => deps.setStatus('Invite link copied (clipboard clears in 60 s).'), () => deps.setStatus('Clipboard not available.', true)) }, 'Copy link'),
+            h('button', { type: 'button', onclick: () => clear(out) }, 'Done (hide link)')),
+          h('p', { class: 'hint' }, `Invite ${inv.id} (${inv.record.role} on ${label(folder)}) expires ${inv.record.expiresAt}. Tell the newcomer the global admin fingerprints separately so they can check them.`),
+        );
+        deps.onChanged();
+      } catch (e) {
+        deps.setStatus(errMsg(e), true);
+      }
+    });
+    return h(
+      'details',
+      {},
+      h('summary', {}, `Invite someone to ${label(folder)}`),
+      h('ol', { class: 'hint' },
+        h('li', {}, 'On GitHub: Settings → Developer settings → Fine-grained tokens → Generate new token.'),
+        h('li', {}, `Resource owner: the owner of ${requestsRepo}. Repository access: Only select repositories → ${requestsRepo}.`),
+        h('li', {}, 'Permissions: Issues: Read and write (Metadata: Read-only is added automatically). Nothing else.'),
+        h('li', {}, `Expiration: custom, at most ${MAX_INVITE_DAYS} days. Revoke it after the request is approved.`)),
+      requestsRepo === `${cfg.owner}/${cfg.repo}` ? h('p', { class: 'banner warn' }, 'No separate requests repo is configured: the invite token will be able to read and edit every issue of the store repo.') : '',
+      h('label', {}, 'Role', role),
+      h('label', {}, 'Valid for (days)', days),
+      note,
+      h('label', {}, 'Requester token (used for the link only, never stored)', token),
+      btn,
+      out,
+    );
   }
 
   return { el, refresh };
