@@ -18,7 +18,7 @@ import { joinPath } from '../paths';
 import { GPG_ID } from '../paths';
 import { checkFolderAdmin, signAdminsFile, verifyAdminsFile } from '../admins';
 import { isFolderRecipient } from './folders';
-import { changeFolderRecipients } from './recipients';
+import { type RecipientChangePlan, RecipientChangeError, changeFolderRecipients, planFolderRecipientChange } from './recipients';
 
 export type ApprovalErrorCode =
   | 'not-parsed'
@@ -27,7 +27,12 @@ export type ApprovalErrorCode =
   | 'no-such-folder'
   | 'not-admin'
   | 'not-recipient'
-  | 'already-recipient';
+  | 'already-recipient'
+  /** The folder's current `.gpg-id` does not verify (it may have been edited without authority). */
+  | 'folder-not-verified'
+  /** The before → after change differs from the one the operator approved. */
+  | 'plan-changed'
+  | 'invalid-change';
 
 export class ApprovalError extends G00passError {
   constructor(
@@ -38,12 +43,26 @@ export class ApprovalError extends G00passError {
   }
 }
 
-/** What the operator explicitly confirmed. The UI must only fill this from ticked checkboxes. */
+/** What the operator explicitly confirmed. The UI must fill this only from what the operator typed / ticked. */
 export interface ApprovalConfirmation {
-  /** The fingerprint the operator confirmed out of band; must equal the request's. */
-  confirmedFingerprint: string;
+  /**
+   * The LAST 8 hex characters of the requester's fingerprint, TYPED by the
+   * operator from what the requester told them out of band (spaces and case
+   * ignored). Must match the request's fingerprint.
+   */
+  fingerprintSuffix: string;
   /** Extra confirmation for requests whose invite could not be verified (always, until invites ship). */
   acknowledgeUninvited?: boolean;
+  /** `digest` of the RecipientChangePlan (before → after) the operator reviewed (previewApproval). */
+  approvedPlan: string;
+}
+
+export const FINGERPRINT_SUFFIX_LENGTH = 8;
+
+/** Does the typed suffix confirm `fingerprint`? */
+export function fingerprintSuffixMatches(typed: string, fingerprint: string): boolean {
+  const t = typed.replace(/\s+/g, '').toUpperCase();
+  return /^[0-9A-F]{8}$/.test(t) && t === fingerprint.toUpperCase().slice(-FINGERPRINT_SUFFIX_LENGTH);
 }
 
 export interface ApproveOptions {
@@ -85,6 +104,22 @@ async function folderAdminsUpdate(
   return (await signAdminsFile({ snapshot, folder, admins: [...existing, add], signingKey, date, signal })).changes;
 }
 
+const asApprovalError = (e: unknown): never => {
+  if (e instanceof RecipientChangeError) throw new ApprovalError(e.code, e.message);
+  throw e;
+};
+
+/**
+ * Re-check authority against `snapshot` and return the exact recipient change
+ * (before → after, full fingerprints) the operator must review; throws
+ * ApprovalError. Refuses when the folder's CURRENT recipients do not verify.
+ */
+export async function previewApproval(snapshot: StoreSnapshot, req: ParsedAccessRequest, operatorFpr: string, signal?: AbortSignal): Promise<RecipientChangePlan> {
+  if (!isParsedAccessRequest(req)) throw new ApprovalError('not-parsed', 'Request was not produced by the verified parser');
+  await assertCanApprove(snapshot, req, operatorFpr);
+  return planFolderRecipientChange(snapshot, req.folder, { add: [{ fingerprint: req.fingerprint, publicKey: req.publicKey }] }, { operatorFingerprint: operatorFpr, signal }).catch(asApprovalError);
+}
+
 /** Re-check authority against `snapshot`; throws ApprovalError. */
 export async function assertCanApprove(snapshot: StoreSnapshot, req: ParsedAccessRequest, operatorFpr: string): Promise<void> {
   if (!snapshot.hasFile(joinPath(req.folder, GPG_ID))) throw new ApprovalError('no-such-folder', `"${req.folder}" has no .gpg-id of its own`);
@@ -96,6 +131,12 @@ export async function assertCanApprove(snapshot: StoreSnapshot, req: ParsedAcces
   }
   const admin = await checkFolderAdmin(snapshot, req.folder, operatorFpr);
   if (!admin.admin) throw new ApprovalError('not-admin', `You are not a verified admin of this folder: ${admin.reason}`);
+  // The current recipient list must itself be verified before anyone re-signs it.
+  try {
+    await planFolderRecipientChange(snapshot, req.folder, {}, { operatorFingerprint: operatorFpr });
+  } catch (e) {
+    if (!(e instanceof RecipientChangeError) || e.code !== 'invalid-change') asApprovalError(e);
+  }
 }
 
 /**
@@ -103,14 +144,19 @@ export async function assertCanApprove(snapshot: StoreSnapshot, req: ParsedAcces
  * recipients, re-encrypt, sign `.gpg-id`, and commit - all in ONE commit,
  * retried on branch conflicts with a fresh snapshot each time.
  *
- * Refuses unless the operator explicitly confirmed the fingerprint (the only
- * identity check, docs/specs/access-requests.md). Does not touch the issue;
- * call `finalizeApprovedIssue` afterwards.
+ * Refuses unless the operator typed the requester's fingerprint suffix (the
+ * only identity check, docs/specs/access-requests.md) and approved the exact
+ * before → after recipient change (`confirmation.approvedPlan`, from
+ * previewApproval), which is recomputed and compared on the snapshot that is
+ * committed on. Does not touch the issue; call `finalizeApprovedIssue` afterwards.
  */
 export async function approveAccessRequest(req: ParsedAccessRequest, opts: ApproveOptions): Promise<ApprovalResult> {
   if (!isParsedAccessRequest(req)) throw new ApprovalError('not-parsed', 'Request was not produced by the verified parser');
-  if (opts.confirmation.confirmedFingerprint.replace(/\s+/g, '').toUpperCase() !== req.fingerprint) {
-    throw new ApprovalError('fingerprint-not-confirmed', 'Fingerprint was not confirmed out of band');
+  if (typeof opts.confirmation.fingerprintSuffix !== 'string' || !fingerprintSuffixMatches(opts.confirmation.fingerprintSuffix, req.fingerprint)) {
+    throw new ApprovalError('fingerprint-not-confirmed', `Type the last ${FINGERPRINT_SUFFIX_LENGTH} characters of the fingerprint the requester gave you out of band`);
+  }
+  if (typeof opts.confirmation.approvedPlan !== 'string' || !opts.confirmation.approvedPlan) {
+    throw new ApprovalError('plan-changed', 'Review the recipient change before approving');
   }
   if ((req.inviteId === null || !opts.inviteVerified) && opts.confirmation.acknowledgeUninvited !== true) {
     throw new ApprovalError('invite-not-acknowledged', 'This request has no verified invite; explicit acknowledgement required');
@@ -133,12 +179,13 @@ export async function approveAccessRequest(req: ParsedAccessRequest, opts: Appro
           writer: opts.writer,
           operatorKey: opts.operatorKey,
           extraChanges,
+          approvedPlanDigest: opts.confirmation.approvedPlan,
           armor: opts.armor,
           message: `g00pass: grant ${req.fingerprint.slice(-16)} ${req.role} on ${req.folder} (${opts.requestRef})`,
           onProgress: opts.onProgress,
           signal: opts.signal,
         },
-      );
+      ).catch(asApprovalError);
     },
     { signal: opts.signal, onConflict: (_e, n) => opts.onConflict?.(n) },
   );

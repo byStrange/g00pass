@@ -15,7 +15,10 @@ import {
   verifyRecipients,
   parseAccessRequest,
   passThroughTrustHook,
+  planFolderRecipientChange,
+  previewApproval,
   setTrustHook,
+  type RecipientChange,
   type IssueSummary,
   type ParsedAccessRequest,
   type ReencryptProgress,
@@ -51,7 +54,7 @@ beforeEach(async () => {
   const rootText = `${alice.fpr}\n${escrow.fpr} # g00pass:escrow\n`;
   const teamText = `${alice.fpr}\n${carol.fpr}\n${escrow.fpr} # g00pass:escrow\n`;
   store = new MemoryStore({
-    ...(await signedGpgId('', rootText, alice.priv)),
+    ...(await signedGpgId('', rootText, alice.priv, { children: ['team'] })),
     ...(await signedGpgId('team', teamText, alice.priv)),
     ...Object.fromEntries([alice, carol, escrow, dave].map((i) => [`.public-keys/${i.fpr}`, i.armoredPublic])),
   });
@@ -65,20 +68,31 @@ async function request(id: TestIdentity, over: Record<string, unknown> = {}): Pr
   if (!r.ok) throw new Error(r.message);
   return r.request;
 }
-const approveOpts = (req: ParsedAccessRequest, over: Record<string, unknown> = {}) => ({
-  loadSnapshot: async () => store,
-  writer,
-  operatorKey: alice.priv,
-  confirmation: { confirmedFingerprint: req.fingerprint, acknowledgeUninvited: true },
-  requestRef: 'acme/requests#7',
-  ...over,
-});
+/** Approve options as the UI builds them: typed suffix + digest of the plan the operator reviewed. */
+const approveOpts = async (req: ParsedAccessRequest, over: Record<string, unknown> = {}) => {
+  const operatorKey = (over.operatorKey as typeof alice.priv | undefined) ?? alice.priv;
+  const plan = await previewApproval(store, req, operatorKey.getFingerprint().toUpperCase()).catch(() => null);
+  return {
+    loadSnapshot: async () => store,
+    writer,
+    operatorKey,
+    confirmation: { fingerprintSuffix: req.fingerprint.slice(-8), acknowledgeUninvited: true, approvedPlan: plan?.digest ?? 'sha256:none' },
+    requestRef: 'acme/requests#7',
+    ...over,
+  };
+};
+/** changeFolderRecipients with the plan computed (and "approved") first. */
+async function change(folder: string, ch: RecipientChange, over: Record<string, unknown> = {}) {
+  const operatorKey = (over.operatorKey as typeof alice.priv | undefined) ?? alice.priv;
+  const plan = await planFolderRecipientChange(store, folder, ch, { operatorFingerprint: operatorKey.getFingerprint().toUpperCase() });
+  return changeFolderRecipients(folder, ch, { snapshot: store, writer, operatorKey, approvedPlanDigest: plan.digest, ...over });
+}
 
 describe('approveAccessRequest', () => {
   it('adds the requester, keeps everyone + escrow, signs .gpg-id, one commit', async () => {
     const req = await request(bob);
     const progress: ReencryptProgress[] = [];
-    const res = await approveAccessRequest(req, approveOpts(req, { onProgress: (p: ReencryptProgress) => progress.push(p) }));
+    const res = await approveAccessRequest(req, await approveOpts(req, { onProgress: (p: ReencryptProgress) => progress.push(p) }));
 
     expect(writer.commits).toHaveLength(1);
     expect(writer.commits[0]!.message).toBe(`g00pass: grant ${bob.fpr.slice(-16)} reader on team (acme/requests#7)`);
@@ -88,7 +102,7 @@ describe('approveAccessRequest', () => {
       for (const who of [bob, alice, carol, escrow]) expect(await decryptText(ct, who)).toBe(secrets[p]);
     }
     const gpgId = dec((await store.readFile('team/.gpg-id'))!);
-    expect(gpgId).toBe(`${alice.fpr}\n${carol.fpr}\n${escrow.fpr} # g00pass:escrow\n${bob.fpr}\n`);
+    expect(gpgId).toBe(`${alice.fpr}\n${carol.fpr}\n${bob.fpr}\n${escrow.fpr} # g00pass:escrow\n`);
     expect(gpgId).toContain(`${escrow.fpr} # g00pass:escrow`);
     expect(gpgId).toContain(bob.fpr);
     expect(dec((await store.readFile(`.public-keys/${bob.fpr}`))!)).toContain('BEGIN PGP PUBLIC KEY BLOCK');
@@ -106,7 +120,7 @@ describe('approveAccessRequest', () => {
 
   it('uses armored inline output above the entry threshold', async () => {
     const req = await request(bob);
-    await approveAccessRequest(req, approveOpts(req, { armor: true }));
+    await approveAccessRequest(req, await approveOpts(req, { armor: true }));
     const ct = (await store.readFile('team/db.gpg'))!;
     expect(dec(ct)).toContain('-----BEGIN PGP MESSAGE-----');
   });
@@ -116,48 +130,60 @@ describe('approveAccessRequest', () => {
     let n = 0;
     const stale = new MemoryStore({}, 'stale');
     for (const p of store.listFiles()) stale.set(p, (await store.readFile(p))!);
-    const res = await approveAccessRequest(req, approveOpts(req, { loadSnapshot: async () => (n++ === 0 ? stale : store) }));
+    const res = await approveAccessRequest(req, await approveOpts(req, { loadSnapshot: async () => (n++ === 0 ? stale : store) }));
     expect(n).toBe(2);
     expect(writer.commits).toHaveLength(1);
     expect(res.commitSha).toBe('mem-1');
   });
 
-  it('refuses without the out-of-band fingerprint confirmation', async () => {
+  it('refuses without the typed fingerprint suffix (L4) or without the approved plan', async () => {
     const req = await request(bob);
-    for (const confirmation of [
-      { confirmedFingerprint: '' , acknowledgeUninvited: true },
-      { confirmedFingerprint: carol.fpr, acknowledgeUninvited: true },
-    ]) {
-      await expect(approveAccessRequest(req, approveOpts(req, { confirmation }))).rejects.toMatchObject({ code: 'fingerprint-not-confirmed' });
+    const base = await approveOpts(req);
+    for (const fingerprintSuffix of ['', carol.fpr.slice(-8), req.fingerprint, req.fingerprint.slice(-7), 'zzzzzzzz']) {
+      await expect(approveAccessRequest(req, { ...base, confirmation: { ...base.confirmation, fingerprintSuffix } })).rejects.toMatchObject({ code: 'fingerprint-not-confirmed' });
     }
-    await expect(approveAccessRequest(req, approveOpts(req, { confirmation: { confirmedFingerprint: req.fingerprint } }))).rejects.toMatchObject({
+    await expect(approveAccessRequest(req, { ...base, confirmation: { ...base.confirmation, acknowledgeUninvited: false } })).rejects.toMatchObject({
       code: 'invite-not-acknowledged',
     });
+    await expect(approveAccessRequest(req, { ...base, confirmation: { ...base.confirmation, approvedPlan: '' } })).rejects.toMatchObject({ code: 'plan-changed' });
     expect(writer.commits).toHaveLength(0);
   });
 
-  it('accepts a spaced, lower-case confirmation of the same fingerprint', async () => {
+  it('C1: refuses when the recipient change differs from the plan the operator approved', async () => {
     const req = await request(bob);
-    const spaced = req.fingerprint.toLowerCase().replace(/(.{4})/g, '$1 ');
-    await approveAccessRequest(req, approveOpts(req, { confirmation: { confirmedFingerprint: spaced, acknowledgeUninvited: true } }));
+    const reviewed = await approveOpts(req);
+    // Someone (validly, under the pass-through hook) adds dave after the operator reviewed the plan.
+    store.set('team/.gpg-id', `${alice.fpr}\n${carol.fpr}\n${dave.fpr}\n${escrow.fpr} # g00pass:escrow\n`);
+    store.set('team/db.gpg', await encryptForTest('db-pass', [alice, carol, dave, escrow]));
+    store.set('team/api/token.gpg', await encryptForTest('tok', [alice, carol, dave, escrow]));
+    await expect(approveAccessRequest(req, reviewed)).rejects.toMatchObject({ code: 'plan-changed' });
+    expect(writer.commits).toHaveLength(0);
+    const plan = await previewApproval(store, req, alice.fpr);
+    expect(plan.before.map((p) => p.fingerprint)).toEqual([alice.fpr, carol.fpr, dave.fpr, escrow.fpr]);
+    expect(plan.after.map((p) => p.fingerprint)).toEqual([alice.fpr, carol.fpr, dave.fpr, bob.fpr, escrow.fpr]);
+    expect(plan.added).toEqual([bob.fpr]);
+    expect(plan.removed).toEqual([]);
+    expect(plan.after.find((p) => p.fingerprint === bob.fpr)?.userIds).toEqual([`Bob <bob@example.test>`]);
+    expect(plan.after.at(-1)).toMatchObject({ fingerprint: escrow.fpr, escrow: true });
+    await approveAccessRequest(req, { ...reviewed, confirmation: { ...reviewed.confirmation, approvedPlan: plan.digest } });
     expect(writer.commits).toHaveLength(1);
   });
 
   it('refuses requests not produced by the parser', async () => {
     const req = { ...(await request(bob)) } as ParsedAccessRequest;
-    await expect(approveAccessRequest(req, approveOpts(req))).rejects.toBeInstanceOf(ApprovalError);
+    await expect(approveAccessRequest(req, await approveOpts(await request(bob)))).rejects.toBeInstanceOf(ApprovalError);
   });
 
   it('refuses a non-admin recipient, a non-recipient, a missing folder and an existing recipient', async () => {
     const req = await request(bob);
     // carol is a recipient but neither folder admin nor global admin
-    await expect(approveAccessRequest(req, approveOpts(req, { operatorKey: carol.priv }))).rejects.toMatchObject({ code: 'not-admin' });
+    await expect(approveAccessRequest(req, await approveOpts(req, { operatorKey: carol.priv }))).rejects.toMatchObject({ code: 'not-admin' });
     // dave: not a recipient
-    await expect(approveAccessRequest(req, approveOpts(req, { operatorKey: dave.priv }))).rejects.toMatchObject({ code: 'not-recipient' });
+    await expect(approveAccessRequest(req, await approveOpts(req, { operatorKey: dave.priv }))).rejects.toMatchObject({ code: 'not-recipient' });
     const nreq = await request(bob, { folder: 'nope' });
-    await expect(approveAccessRequest(nreq, approveOpts(nreq))).rejects.toMatchObject({ code: 'no-such-folder' });
+    await expect(approveAccessRequest(nreq, await approveOpts(nreq))).rejects.toMatchObject({ code: 'no-such-folder' });
     const creq = await request(carol);
-    await expect(approveAccessRequest(creq, approveOpts(creq))).rejects.toMatchObject({ code: 'already-recipient' });
+    await expect(approveAccessRequest(creq, await approveOpts(creq))).rejects.toMatchObject({ code: 'already-recipient' });
     expect(writer.commits).toHaveLength(0);
   });
 
@@ -165,11 +191,11 @@ describe('approveAccessRequest', () => {
     for (const [p, c] of Object.entries(await adminsFiles(store, 'team', [carol.fpr], alice.priv))) store.set(p, c);
     const req = await request(bob);
     // carol (folder admin via signed file, and a recipient) may approve; the operator key must decrypt
-    await approveAccessRequest(req, approveOpts(req, { operatorKey: carol.priv }));
+    await approveAccessRequest(req, await approveOpts(req, { operatorKey: carol.priv }));
     expect(writer.commits).toHaveLength(1);
 
     const req2 = await request(dave, { role: 'folder-admin' });
-    await approveAccessRequest(req2, approveOpts(req2));
+    await approveAccessRequest(req2, await approveOpts(req2));
     const file = JSON.parse(dec((await store.readFile('team/.g00pass-admins.json'))!));
     expect(file).toMatchObject({ admins: [carol.fpr, dave.fpr].sort(), serial: 2, updatedBy: alice.fpr, folder: 'team' });
     expect(file.previous).toMatch(/^sha256:[0-9a-f]{64}$/);
@@ -180,36 +206,41 @@ describe('approveAccessRequest', () => {
   it('refuses when the root is not trusted (no pinned anchors), even for a recipient anchor', async () => {
     pinAnchors(STORE_ID, [dave.fpr], 'manual');
     const req = await request(bob);
-    await expect(approveAccessRequest(req, approveOpts(req))).rejects.toMatchObject({ code: 'not-admin' });
+    await expect(approveAccessRequest(req, await approveOpts(req))).rejects.toMatchObject({ code: 'not-admin' });
     expect(writer.commits).toHaveLength(0);
   });
 
   it('a global admin who is not a recipient cannot approve', async () => {
     store.set('.gpg-id', `${alice.fpr}\n${dave.fpr}\n${escrow.fpr} # g00pass:escrow\n`);
     const req = await request(bob);
-    await expect(approveAccessRequest(req, approveOpts(req, { operatorKey: dave.priv }))).rejects.toMatchObject({ code: 'not-recipient' });
+    await expect(approveAccessRequest(req, await approveOpts(req, { operatorKey: dave.priv }))).rejects.toMatchObject({ code: 'not-recipient' });
   });
 
   it('nothing is committed when an entry cannot be decrypted', async () => {
     store.set('team/other.gpg', await encryptForTest('x', [carol, escrow]));
     const req = await request(bob);
-    await expect(approveAccessRequest(req, approveOpts(req))).rejects.toMatchObject({ name: 'ReencryptError' });
+    await expect(approveAccessRequest(req, await approveOpts(req))).rejects.toMatchObject({ name: 'ReencryptError' });
     expect(writer.commits).toHaveLength(0);
   });
 
   it('encryption goes through the trust hook (a rejecting hook blocks approval)', async () => {
-    setTrustHook({ name: 'deny', verify: async () => ({ ok: false, code: 'unknown-signer', reason: 'no' }) });
     const req = await request(bob);
-    await expect(approveAccessRequest(req, approveOpts(req))).rejects.toMatchObject({ name: 'TrustError' });
+    const o = await approveOpts(req);
+    // Rejects the CURRENT set: refused up front (C1), before anything is signed.
+    setTrustHook({ name: 'deny', verify: async () => ({ ok: false, code: 'unknown-signer', reason: 'no' }) });
+    await expect(approveAccessRequest(req, o)).rejects.toMatchObject({ code: 'folder-not-verified' });
+    // Accepts the current set, rejects the proposed one: the re-encrypt is refused by the hook.
+    setTrustHook({ name: 'deny-proposed', verify: async (r) => (r.proposed ? { ok: false, code: 'unknown-signer', reason: 'no' } : { ok: true }) });
+    await expect(approveAccessRequest(req, o)).rejects.toMatchObject({ name: 'TrustError' });
     expect(writer.commits).toHaveLength(0);
   });
 });
 
 describe('changeFolderRecipients (shared with remove-member)', () => {
-  const opts = () => ({ snapshot: store, writer, operatorKey: alice.priv });
+  const opts = () => ({ snapshot: store, writer, operatorKey: alice.priv, approvedPlanDigest: 'unused' });
 
   it('removes a member: old ciphertext key no longer a recipient, escrow cannot be removed', async () => {
-    await changeFolderRecipients('team', { remove: [carol.fpr] }, opts());
+    await change('team', { remove: [carol.fpr] });
     const ct = (await store.readFile('team/db.gpg'))!;
     expect(await decryptText(ct, alice)).toBe('db-pass');
     expect(await decryptText(ct, escrow)).toBe('db-pass');
@@ -231,7 +262,7 @@ describe('changeFolderRecipients (shared with remove-member)', () => {
   it('is cancellable', async () => {
     const ac = new AbortController();
     ac.abort();
-    await expect(changeFolderRecipients('team', { remove: [carol.fpr] }, { ...opts(), signal: ac.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(change('team', { remove: [carol.fpr] }, { signal: ac.signal })).rejects.toMatchObject({ name: 'AbortError' });
     expect(writer.commits).toHaveLength(0);
   });
 });
@@ -261,7 +292,7 @@ describe('approval with the REAL signatureTrustHook', () => {
     for (const [p, c] of Object.entries(await adminsFiles(store, 'team', [carol.fpr], alice.priv))) store.set(p, c);
     const req = await request(bob);
     // carol is a folder admin (signed file) and a recipient; her .gpg-id signature must verify.
-    const res = await approveAccessRequest(req, approveOpts(req, { operatorKey: carol.priv }));
+    const res = await approveAccessRequest(req, await approveOpts(req, { operatorKey: carol.priv }));
     expect(writer.commits).toHaveLength(1);
     expect(res.commitSha).toBe(store.commitSha);
     expect(dec((await store.readFile('team/.gpg-id'))!)).toContain(bob.fpr);
@@ -274,14 +305,14 @@ describe('approval with the REAL signatureTrustHook', () => {
   it('a folder-admin approval writes an admins file the verifier accepts', async () => {
     setTrustHook(signatureTrustHook);
     const req = await request(dave, { role: 'folder-admin' });
-    await approveAccessRequest(req, approveOpts(req));
+    await approveAccessRequest(req, await approveOpts(req));
     expect(await isVerifiedFolderAdmin(store, 'team', dave.fpr)).toBe(true);
   });
 
   it('refuses a non-admin recipient before anything is written', async () => {
     setTrustHook(signatureTrustHook);
     const req = await request(bob);
-    await expect(approveAccessRequest(req, approveOpts(req, { operatorKey: carol.priv }))).rejects.toMatchObject({ code: 'not-admin' });
+    await expect(approveAccessRequest(req, await approveOpts(req, { operatorKey: carol.priv }))).rejects.toMatchObject({ code: 'not-admin' });
     expect(writer.commits).toHaveLength(0);
   });
 });

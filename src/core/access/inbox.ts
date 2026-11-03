@@ -4,10 +4,20 @@ import { type ParseErrorCode, type ParsedAccessRequest, REQUEST_MARKER, parseAcc
 import type { StoreSnapshot } from '../store';
 import { checkFolderAdmin } from '../admins';
 import { isFolderRecipient } from './folders';
+import { type RecipientChangePlan, RecipientChangeError, planFolderRecipientChange } from './recipients';
 
 export interface InboxItem {
   issue: IssueSummary;
   request: ParsedAccessRequest;
+  /** The exact before → after recipient change, computed on the inbox snapshot (show it; approve its digest). */
+  plan: RecipientChangePlan;
+}
+/** Valid request, operator is an admin recipient, but the folder must not be re-signed as it is. */
+export interface BlockedInboxItem {
+  issue: IssueSummary;
+  request: ParsedAccessRequest;
+  code: 'folder-not-verified' | 'invalid-change' | 'not-recipient' | 'plan-changed';
+  reason: string;
 }
 export interface InvalidInboxItem {
   issue: IssueSummary;
@@ -17,6 +27,8 @@ export interface InvalidInboxItem {
 export interface Inbox {
   /** Valid requests the operator can approve or deny. */
   actionable: InboxItem[];
+  /** Valid requests the operator would administer, but NOT approvable now (e.g. the folder's current .gpg-id does not verify); shown with the reason. */
+  blocked: BlockedInboxItem[];
   /** Marked as requests but failed verification; shown with the reason, never approvable. */
   invalid: InvalidInboxItem[];
   /** Valid requests for folders the operator cannot act on (not shown). */
@@ -37,7 +49,7 @@ export async function buildInbox(opts: {
   operatorFingerprint: string;
   now?: Date;
 }): Promise<Inbox> {
-  const inbox: Inbox = { actionable: [], invalid: [], hidden: 0, hiddenReasons: [] };
+  const inbox: Inbox = { actionable: [], blocked: [], invalid: [], hidden: 0, hiddenReasons: [] };
   const { snapshot, operatorFingerprint } = opts;
   for (const issue of opts.issues) {
     if (issue.state !== 'open' || !issue.body?.includes(REQUEST_MARKER)) continue;
@@ -55,7 +67,13 @@ export async function buildInbox(opts: {
       const recipient = await isFolderRecipient(snapshot, req.folder, operatorFingerprint);
       const admin = await checkFolderAdmin(snapshot, req.folder, operatorFingerprint);
       if (recipient && admin.admin) {
-        inbox.actionable.push({ issue, request: req });
+        try {
+          const plan = await planFolderRecipientChange(snapshot, req.folder, { add: [{ fingerprint: req.fingerprint, publicKey: req.publicKey }] }, { operatorFingerprint });
+          inbox.actionable.push({ issue, request: req, plan });
+        } catch (e) {
+          if (!(e instanceof RecipientChangeError)) throw e;
+          inbox.blocked.push({ issue, request: req, code: e.code, reason: e.message });
+        }
       } else {
         inbox.hidden++;
         inbox.hiddenReasons.push({

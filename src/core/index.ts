@@ -5,7 +5,7 @@ export * from './gpgid';
 export * from './store';
 export * from './keys';
 export * from './trust';
-export { encryptToVerified } from './crypto/encrypt';
+export { encryptToVerified, installEncryptGuard, isEncryptGuardInstalled } from './crypto/encrypt';
 export { decryptEntry, unlockPrivateKey, readProtectedPrivateKey, KeyUnlockError, wipe } from './crypto/decrypt';
 export * from './entries';
 export * from './reencrypt';
@@ -20,6 +20,7 @@ export * from './trust-env';
 export * from './anchors';
 export * from './admins';
 export * from './trust-policy';
+export * from './boundaries';
 export { GitHubFileHistory, type FileHistory, type FileVersion } from './github/history';
 export * from './requests/keygen';
 export {
