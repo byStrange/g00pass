@@ -1,0 +1,34 @@
+{
+  "name": "g00pass",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "gopass-web: browser-side OpenPGP client for gopass/pass stores hosted on GitHub",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit -p tsconfig.json && vite build && node scripts/check-dist.mjs",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "npm run build && vitest run -c vitest.e2e.config.ts",
+    "seed-demo-store": "node scripts/seed-demo-store.mjs"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "openpgp": "6.3.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.19.2",
+    "eslint": "10.14.0",
+    "globals": "17.14.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}
