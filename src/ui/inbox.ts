@@ -8,10 +8,13 @@ import {
   finalizeApprovedIssue,
   formatFingerprint,
   listIssues,
+  FINGERPRINT_SUFFIX_LENGTH,
   type GitHubClient,
   type GitHubRepo,
   type InboxItem,
   type IssueRepo,
+  type PlannedRecipient,
+  type RecipientChangePlan,
   type ReencryptProgress,
 } from '../core';
 import { clear, h } from './dom';
@@ -46,9 +49,11 @@ const errMsg = (e: unknown) => (e instanceof G00passError ? e.message : 'Unexpec
 
 /**
  * Admin inbox. SECURITY: everything from an issue (name, note, user ids,
- * reasons) is attacker-controlled and is only ever put into the DOM through
- * text nodes (`h()` never uses innerHTML). Approval is gated twice: the UI
- * needs the ticked checkboxes, and the core refuses without the confirmation.
+ * reasons) is attacker-controlled, sanitized by the parser (bidi / zero-width
+ * characters replaced) and only ever put into the DOM through text nodes
+ * (`h()` never uses innerHTML), isolated with `dir`. Approval is gated twice:
+ * the UI needs the typed fingerprint suffix and the reviewed before → after
+ * plan, and the core re-checks both (suffix, plan digest on the commit base).
  */
 export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => Promise<void>; clear: () => void } {
   const body = h('div', { class: 'inbox-list' });
@@ -92,9 +97,15 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
       clear(body);
       summary.textContent =
         `${inbox.actionable.length} request(s) you can act on` +
+        (inbox.blocked.length ? `; ${inbox.blocked.length} blocked` : '') +
         (inbox.hidden ? `; ${inbox.hidden} for folders where you are not a verified admin recipient (see reasons)` : '') +
         '.';
       for (const item of inbox.actionable) body.append(renderItem(item, issueRepo));
+      if (inbox.blocked.length) {
+        const list = h('ul', { class: 'invalid' });
+        for (const b of inbox.blocked.slice(0, 20)) list.append(h('li', {}, `#${b.issue.number} (${b.request.folder}): NOT approvable. ${b.reason}`));
+        body.append(h('p', { class: 'banner danger', role: 'alert' }, `${inbox.blocked.length} request(s) cannot be approved because the folder's current recipient list is not verified or cannot be re-signed. Do not work around this: someone may have edited it without authority.`), list);
+      }
       if (inbox.hiddenReasons.length) {
         const list = h('ul', { class: 'invalid' });
         for (const i of inbox.hiddenReasons.slice(0, 20)) list.append(h('li', {}, `#${i.issue.number} (${i.folder}): ${i.reason}`));
@@ -114,22 +125,69 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
     }
   }
 
-  function renderItem({ issue, request: r }: InboxItem, issueRepo: IssueRepo): HTMLElement {
-    const confirm = h('input', { type: 'checkbox' });
+  function recipientList(title: string, list: readonly PlannedRecipient[], mark: (fpr: string) => string | null): HTMLElement {
+    return h(
+      'div',
+      { class: 'plan-side' },
+      h('h4', {}, title),
+      h(
+        'ul',
+        { class: 'fprs' },
+        ...list.map((p) => {
+          const m = mark(p.fingerprint);
+          return h(
+            'li',
+            { class: m ?? '' },
+            h('span', { class: 'mono', dir: 'ltr' }, formatFingerprint(p.fingerprint)),
+            ' ',
+            h('span', { class: 'hint uid', dir: 'auto' }, p.userIds.length ? p.userIds.join(', ') : '(no user id)'),
+            p.escrow ? h('span', { class: 'badge' }, 'escrow') : null,
+            m ? h('span', { class: `badge ${m}` }, m) : null,
+          );
+        }),
+      ),
+    );
+  }
+
+  function renderPlan(plan: RecipientChangePlan): HTMLElement {
+    return h(
+      'div',
+      { class: 'plan' },
+      h('p', {}, `Recipients of ${plan.folder}/ will change exactly as follows. Everyone in “after” will be able to decrypt every entry in this folder.`),
+      recipientList('Before', plan.before, (f) => (plan.removed.includes(f) ? 'removed' : null)),
+      recipientList('After', plan.after, (f) => (plan.added.includes(f) ? 'added' : null)),
+      plan.droppedEscrow.length ? h('p', { class: 'hint' }, `Retired escrow key(s) dropped: ${plan.droppedEscrow.map(formatFingerprint).join(', ')}`) : null,
+      plan.childBoundaries.length ? h('p', { class: 'hint' }, `Sub-folders that keep their own recipients (declared in the signature): ${plan.childBoundaries.map((c) => c + '/').join(', ')}`) : null,
+      plan.warnings.includes('escrow-missing') ? h('p', { class: 'hint' }, 'This also restores the missing escrow recipient.') : null,
+    );
+  }
+
+  function renderItem({ issue, request: r, plan }: InboxItem, issueRepo: IssueRepo): HTMLElement {
+    const suffix = h('input', {
+      autocomplete: 'off',
+      spellcheck: 'false',
+      maxlength: '12',
+      inputmode: 'text',
+      placeholder: `last ${FINGERPRINT_SUFFIX_LENGTH} characters`,
+      'aria-label': `Last ${FINGERPRINT_SUFFIX_LENGTH} characters of the fingerprint, as the requester told you`,
+    });
+    const reviewed = h('input', { type: 'checkbox' });
     const ack = h('input', { type: 'checkbox' });
     const approveBtn = h('button', { type: 'button', class: 'primary', disabled: true }, 'Approve');
     const cancelBtn = h('button', { type: 'button', hidden: true }, 'Cancel');
     const denyBtn = h('button', { type: 'button', class: 'danger' }, 'Deny');
     const reason = h('input', { placeholder: 'Reason for denying (optional)', maxlength: '500', autocomplete: 'off' });
     const progress = h('p', { class: 'hint', role: 'status', 'aria-live': 'polite' });
+    const ready = () => suffix.value.replace(/\s+/g, '').length === FINGERPRINT_SUFFIX_LENGTH && reviewed.checked && ack.checked;
     const sync = () => {
-      approveBtn.disabled = !(confirm.checked && ack.checked);
+      approveBtn.disabled = !ready();
     };
-    confirm.addEventListener('change', sync);
+    suffix.addEventListener('input', sync);
+    reviewed.addEventListener('change', sync);
     ack.addEventListener('change', sync);
     let abort: AbortController | null = null;
     const setBusy = (b: boolean) => {
-      for (const x of [approveBtn, denyBtn, confirm, ack, reason]) x.disabled = b || (x === approveBtn && !(confirm.checked && ack.checked));
+      for (const x of [approveBtn, denyBtn, suffix, reviewed, ack, reason]) x.disabled = b || (x === approveBtn && !ready());
       cancelBtn.hidden = !b;
     };
 
@@ -144,9 +202,12 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
           loadSnapshot: (signal) => GitHubSnapshot.load(deps.client, cfg, { signal }),
           writer: new GitHubWriter(deps.client, cfg),
           operatorKey: key,
+          // Core re-checks both: the typed suffix against the request, and the
+          // reviewed plan digest against the plan recomputed on the commit base.
           confirmation: {
-            confirmedFingerprint: confirm.checked ? r.fingerprint : '',
+            fingerprintSuffix: suffix.value,
             acknowledgeUninvited: ack.checked,
+            approvedPlan: reviewed.checked ? plan.digest : '',
           },
           requestRef: `${issueRepo.owner}/${issueRepo.repo}#${issue.number}`,
           onProgress: (p) => {
@@ -168,7 +229,8 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
         deps.onApproved();
       } catch (e) {
         const aborted = e instanceof Error && e.name === 'AbortError';
-        deps.setStatus(aborted ? 'Approval cancelled; nothing was committed.' : errMsg(e), true);
+        const changed = e instanceof G00passError && (e as { code?: string }).code === 'plan-changed';
+        deps.setStatus(aborted ? 'Approval cancelled; nothing was committed.' : changed ? `${errMsg(e)} Reload the access requests.` : errMsg(e), true);
         progress.textContent = '';
         setBusy(false);
       } finally {
@@ -191,15 +253,17 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
     const card = h(
       'article',
       { class: 'request' },
-      h('h3', {}, `${r.name} `, h('span', { class: 'badge' }, `#${issue.number}`)),
-      h('p', { class: 'hint' }, r.userIds.length ? `Key user id: ${r.userIds.join(', ')}` : 'Key has no user id'),
-      r.email ? h('p', {}, `E-mail on key: ${r.email}`) : null,
-      h('p', { class: 'fpr mono', 'aria-label': 'Full fingerprint' }, formatFingerprint(r.fingerprint)),
+      h('h3', { dir: 'auto' }, `${r.name} `, h('span', { class: 'badge' }, `#${issue.number}`)),
+      h('p', { class: 'hint uid', dir: 'auto' }, r.userIds.length ? `Key user id: ${r.userIds.join(', ')}` : 'Key has no user id'),
+      r.email ? h('p', { dir: 'auto' }, `E-mail on key: ${r.email}`) : null,
+      h('p', { class: 'fpr mono', dir: 'ltr', 'aria-label': 'Full fingerprint' }, formatFingerprint(r.fingerprint)),
       h('p', {}, `Folder: ${r.folder}  ·  Role: ${r.role}`),
       h('p', {}, h('span', { class: 'badge ok' }, 'Signature valid'), ' ', h('span', { class: 'hint' }, 'proves the requester holds this key, not who they are')),
       h('p', {}, h('span', { class: 'badge warn' }, r.inviteId ? 'Invite not verified' : 'Uninvited')),
-      r.note ? h('pre', { class: 'details' }, r.note) : null,
-      h('label', { class: 'inline' }, confirm, `I confirmed this fingerprint with ${r.name} through another channel (not this issue).`),
+      r.note ? h('pre', { class: 'details', dir: 'auto' }, r.note) : null,
+      renderPlan(plan),
+      h('label', {}, `Ask ${r.name} for their fingerprint through another channel (not this issue) and type its LAST ${FINGERPRINT_SUFFIX_LENGTH} characters:`, suffix),
+      h('label', { class: 'inline' }, reviewed, 'I reviewed the recipient change above (before → after) and approve exactly that.'),
       h('label', { class: 'inline' }, ack, 'I understand this request has no verified invite.'),
       h('div', { class: 'row' }, approveBtn, cancelBtn),
       progress,

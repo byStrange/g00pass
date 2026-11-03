@@ -4,6 +4,7 @@ import {
   GitHubSnapshot,
   TokenStore,
   getTrustHook,
+  inspectImportedKey,
   isHiddenEntry,
   listEntries,
   readEntry,
@@ -15,6 +16,7 @@ import { h, clear } from './dom';
 import { deviceKeyInfo, forgetDeviceKey, loadDeviceKeyArmored, saveDeviceKey } from './keystore';
 import { createEnrollment } from './enroll';
 import { mountInbox } from './inbox';
+import { acknowledgeOriginRisk, assessOrigin, isOriginRiskAcknowledged } from './origin';
 import { Session, copyWithAutoClear } from './session';
 import { createTrustPanel } from './trust';
 
@@ -35,7 +37,43 @@ function errMsg(e: unknown): string {
   return e instanceof G00passError ? e.message : 'Unexpected error';
 }
 
+/**
+ * Blocking warning when the app does not own its origin (M2): shared
+ * localStorage exposes the device key and the trust anchors to other pages.
+ * Resolves once the user explicitly accepts the risk for this origin + path.
+ */
+function originGate(root: HTMLElement): Promise<void> {
+  const risk = assessOrigin(location);
+  if (!risk.risky || isOriginRiskAcknowledged(localStorage, risk)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const ok = h('input', { type: 'checkbox' });
+    const btn = h('button', { type: 'button', class: 'danger', disabled: true }, 'I understand the risk, continue');
+    ok.addEventListener('change', () => (btn.disabled = !ok.checked));
+    const screen = h(
+      'section',
+      { class: 'card origin-gate', role: 'alertdialog', 'aria-labelledby': 'origin-gate-title' },
+      h('h2', { id: 'origin-gate-title' }, 'Unsafe hosting: this origin is shared'),
+      h('p', { class: 'banner danger' }, `g00pass keeps your passphrase-protected device key and the pinned global admins (trust anchors) in this browser's storage for ${location.origin}. Every page on that origin can read and change them.`),
+      h('ul', {}, ...risk.reasons.map((r) => h('li', {}, r))),
+      h('p', {}, 'A page on the same origin could steal the encrypted key (and try passphrases offline) or replace the pinned anchors so that you trust an attacker. Deploy g00pass at the root of a dedicated origin (its own domain or subdomain) on a host that serves dist/_headers, e.g. Cloudflare Pages or Netlify.'),
+      h('label', { class: 'inline' }, ok, `I understand that other pages on ${risk.scope} can read and modify g00pass data.`),
+      btn,
+    );
+    btn.addEventListener('click', () => {
+      if (!ok.checked) return;
+      acknowledgeOriginRisk(localStorage, risk);
+      screen.remove();
+      resolve();
+    });
+    root.append(screen);
+  });
+}
+
 export function mountApp(root: HTMLElement): void {
+  void originGate(root).then(() => mountAppUnguarded(root));
+}
+
+function mountAppUnguarded(root: HTMLElement): void {
   const tokens = new TokenStore('session');
   let config = loadConfig();
   let snapshot: GitHubSnapshot | null = null;
@@ -136,6 +174,8 @@ export function mountApp(root: HTMLElement): void {
         h('button', {
           onclick: async () => {
             try {
+              // Same checks as enrollment import (protected, v4, accepted algorithm).
+              await inspectImportedKey(ta.value);
               await saveDeviceKey(ta.value);
               ta.value = '';
               setStatus('Key stored.');

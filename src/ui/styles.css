@@ -56,3 +56,11 @@ select { font: inherit; color: inherit; padding: .45rem .6rem; border: 1px solid
 button.primary { border-color: var(--accent); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 .invalid { margin: .3rem 0 0; padding-left: 1.2rem; }
+/* approval plan (before -> after) */
+.plan { display: grid; gap: .4rem; border-top: 1px solid var(--line); padding-top: .5rem; }
+.plan h4 { margin: 0; font-size: .9rem; }
+.plan li.added { color: var(--accent); font-weight: 600; }
+.plan li.removed { color: var(--danger); text-decoration: line-through; }
+.uid { unicode-bidi: isolate; }
+.badge.added, .badge.removed { margin-left: .3rem; }
+.origin-gate { border-color: var(--danger); }

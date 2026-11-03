@@ -4,7 +4,9 @@ import {
   entryFile,
   evaluateRootTrust,
   folderTrustStatus,
+  G00passError,
   getPinnedAnchors,
+  normalizeFingerprints,
   parsePublicKey,
   pinAnchors,
   resetAnchors,
@@ -24,7 +26,12 @@ export function formatFingerprint(fpr: string): string {
 const folderName = (f: string) => (f ? `${f}/` : '/ (root)');
 
 function describe(st: FolderTrustStatus): string {
-  if (st.verified) return 'verified: recipients signed by an authorized admin';
+  if (st.verified) {
+    const gone = st.warnings.filter((w) => w.startsWith('boundary-vanished:')).map((w) => w.slice('boundary-vanished:'.length) + '/');
+    return gone.length
+      ? `verified, but the recipient list of sub-folder(s) ${gone.join(', ')} was DELETED; writing there and re-encrypting this folder are disabled`
+      : 'verified: recipients signed by an authorized admin';
+  }
   switch (st.code) {
     case 'signature-missing':
       return 'NOT verified: recipients are not signed by an admin. Writing is disabled.';
@@ -33,6 +40,10 @@ function describe(st: FolderTrustStatus): string {
       return `NOT verified: recipient list was changed by an unauthorized key or the signature is invalid (${st.reason ?? ''}). Writing is disabled.`;
     case 'anchor-mismatch':
       return 'NOT verified: root recipients do not match your pinned global admins. Writing is disabled.';
+    case 'boundary-vanished':
+      return `NOT verified: a sub-folder's own recipient list (.gpg-id) was deleted (${st.reason ?? ''}). Writing is disabled so its secrets are not encrypted to the parent's recipients.`;
+    case 'boundary-undeclared':
+      return `NOT verified: this folder's recipient list is not declared by its parent folder's signature (${st.reason ?? ''}). Writing is disabled.`;
     default:
       return `NOT verified: ${st.reason ?? 'unknown reason'}. Writing is disabled.`;
   }
@@ -59,13 +70,44 @@ export function createTrustPanel(opts: { setStatus: (t: string, isError?: boolea
   const settings = h('section', { class: 'card', hidden: true });
   let generation = 0;
 
+  /** Manual pin (store-layout.md §Trust anchors, source 'manual'): full fingerprints typed/pasted from a trusted channel. */
+  function manualPinForm(repo: GitHubRepo, onChange: () => void): HTMLElement {
+    const ta = h('textarea', { rows: '3', spellcheck: 'false', placeholder: 'Full fingerprints of the global admins, one per line' });
+    const ok = h('input', { type: 'checkbox' });
+    return h(
+      'details',
+      {},
+      h('summary', {}, 'Pin global admins manually'),
+      h('p', { class: 'hint' }, 'Paste the FULL fingerprints your admin gave you through a channel you already trust. This replaces the pinned set and clears derived trust state for this store.'),
+      ta,
+      h('label', { class: 'inline' }, ok, 'These fingerprints come from my admin through a trusted channel.'),
+      h('button', {
+        type: 'button',
+        onclick: () => {
+          if (!ok.checked) return opts.setStatus('Confirm where the fingerprints come from first.', true);
+          try {
+            const fprs = normalizeFingerprints(ta.value.split(/[\n,;]+/).map((l) => l.replace(/\s+/g, '')).filter(Boolean));
+            if (!fprs.length) return opts.setStatus('Enter at least one full fingerprint.', true);
+            if (!confirm(`Pin these ${fprs.length} global admin(s)?\n\n${fprs.map(formatFingerprint).join('\n')}`)) return;
+            pinAnchors(repo, fprs, 'manual');
+            ta.value = '';
+            opts.setStatus('Global admins pinned manually.');
+            onChange();
+          } catch (e) {
+            opts.setStatus(e instanceof G00passError ? e.message : 'Invalid fingerprints.', true);
+          }
+        },
+      }, 'Pin these fingerprints'),
+    );
+  }
+
   async function renderSettings(repo: GitHubRepo, onChange: () => void) {
     clear(settings);
     settings.hidden = false;
     const pinned = getPinnedAnchors(repo);
     settings.append(h('h2', {}, 'Pinned global admins (trust anchors)'));
     if (!pinned) {
-      settings.append(h('p', { class: 'hint' }, `None pinned for ${storeIdOf(repo)}.`));
+      settings.append(h('p', { class: 'hint' }, `None pinned for ${storeIdOf(repo)}.`), manualPinForm(repo, onChange));
       return;
     }
     settings.append(
@@ -80,6 +122,7 @@ export function createTrustPanel(opts: { setStatus: (t: string, isError?: boolea
           onChange();
         },
       }, 'Reset pinned anchors'),
+      manualPinForm(repo, onChange),
     );
   }
 
