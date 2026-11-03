@@ -133,7 +133,8 @@ describe('approveAccessRequest', () => {
     const res = await approveAccessRequest(req, await approveOpts(req, { loadSnapshot: async () => (n++ === 0 ? stale : store) }));
     expect(n).toBe(2);
     expect(writer.commits).toHaveLength(1);
-    expect(res.commitSha).toBe('mem-1');
+    expect(res.commitSha).toBe(store.commitSha);
+    expect(res.commitSha).toMatch(/^mem-\d+$/);
   });
 
   it('refuses without the typed fingerprint suffix (L4) or without the approved plan', async () => {

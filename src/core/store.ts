@@ -104,6 +104,9 @@ export class MemoryStore implements StoreSnapshot {
   }
 }
 
+/** Commit ids are unique per process (like real shas), even across writers of one store. */
+let memoryCommits = 0;
+
 /** A StoreWriter over a MemoryStore with the same CAS semantics as GitHub. */
 export class MemoryWriter implements StoreWriter {
   private n = 0;
@@ -115,7 +118,8 @@ export class MemoryWriter implements StoreWriter {
       if (c.delete) this.store.delete(c.path);
       else this.store.set(c.path, c.content);
     }
-    this.store.commitSha = `mem-${++this.n}`;
+    ++this.n;
+    this.store.commitSha = `mem-${++memoryCommits}`;
     this.commits.push({ message: opts.message, changes: [...changes] });
     return { commitSha: this.store.commitSha, treeSha: `tree-${this.n}` };
   }

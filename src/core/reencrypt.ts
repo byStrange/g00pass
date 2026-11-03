@@ -1,5 +1,9 @@
 import { readMessage, type PrivateKey, type PublicKey } from 'openpgp';
 import { ADMINS_FILE, ADMINS_SIG } from './admins';
+import { FOLDER_NOTATION, folderNotationValue, parseDetachedSignature } from './signatures';
+
+/** `.g00pass/invites/<id>.json` and `.sig` (access-requests.md §Invite registry). */
+export const INVITE_RECORD_RE = /^\.g00pass\/invites\/[A-Za-z0-9_-]{22}\.json(\.sig)?$/;
 import { decryptEntry, wipe } from './crypto/decrypt';
 import { encryptToVerified } from './crypto/encrypt';
 import { DecryptError, ReencryptError, throwIfAborted } from './errors';
@@ -39,7 +43,7 @@ export interface ReencryptOptions {
   /**
    * Detached signature for the new `.gpg-id` or a signer callback receiving
    * the exact text and the child boundaries to declare, e.g.
-   * `(text, { folder, children }) => signGpgId(text, folder, key, { children })`.
+   * `(text, { folder, children, removed }) => signGpgId(text, folder, key, { children, removed })`.
    * If none, an existing `.gpg-id.sig` is deleted (a stale signature must
    * never sit next to a changed `.gpg-id`).
    */
@@ -52,11 +56,20 @@ export interface ReencryptOptions {
    */
   replaceEntries?: readonly { path: string; plaintext: Uint8Array }[];
   /**
-   * Additional files for the same commit. Only the folder's own admins file
-   * (`<folder>/.g00pass-admins.json` and its `.sig`, from signAdminsFile) is
-   * allowed; anything else is refused.
+   * Additional files for the same commit. Only allowed: the folder's own
+   * admins file (`<folder>/.g00pass-admins.json` + `.sig`, signAdminsFile);
+   * for nested boundaries D, D's admins file and a new `D/.gpg-id.sig` bound
+   * to D (re-signs after an admin removal); deleting an existing invite record
+   * (`.g00pass/invites/<id>.json` + `.sig`). Anything else is refused.
    */
   extraChanges?: readonly FileChange[];
+  /**
+   * Create sub-folder: `folder` gets its first `.gpg-id`, and the parent
+   * boundary's new signature (declaring `folder` as a child, over the
+   * parent's unchanged `.gpg-id`) is committed in the same commit. The
+   * trust policy checks it (parentDeclarationChain).
+   */
+  newBoundary?: { parent: string; signature: Uint8Array };
   message?: string;
   /** Entries per chunk between progress callbacks / event-loop yields (default 20). */
   chunkSize?: number;
@@ -167,9 +180,11 @@ export async function reencryptFolder(
 
   const governing = await currentGoverningKeys(snapshot, folder, signal);
 
+  if (opts.newBoundary && snapshot.hasFile(joinPath(folder, GPG_ID))) throw new ReencryptError(`"${folder}" already has a .gpg-id`);
   const proposed = await verifyProposedRecipients(snapshot, folder, newRecipients, {
     pending,
     signature: opts.gpgIdSignature ?? null,
+    parentDeclaration: opts.newBoundary ? { folder: opts.newBoundary.parent, signature: opts.newBoundary.signature } : undefined,
     signal,
   });
 
@@ -243,16 +258,37 @@ export async function reencryptFolder(
   const sigPath = joinPath(folder, GPG_ID_SIG);
   if (proposed.gpgIdSignature) changes.push({ path: sigPath, content: proposed.gpgIdSignature });
   else if (snapshot.hasFile(sigPath)) changes.push({ path: sigPath, delete: true });
+  if (opts.newBoundary) changes.push({ path: joinPath(normalizePath(opts.newBoundary.parent), GPG_ID_SIG), content: opts.newBoundary.signature });
   for (const [fpr, armored] of pending) {
     const kp = joinPath(PUBLIC_KEYS_DIR, fpr);
     if (!snapshot.hasFile(kp)) changes.push({ path: kp, content: armored });
   }
   const reserved = new Set(changes.map((c) => normalizePath(c.path)));
-  const allowedExtra = new Set([joinPath(folder, ADMINS_FILE), joinPath(folder, ADMINS_SIG)]);
+  // Allowed: the folder's own admins file; for nested boundaries D (re-signs
+  // after an admin removal) D's admins file and a NEW signature over D's
+  // unchanged `.gpg-id` (bound to D); and the deletion of one invite record.
+  const allowedExtra = new Set(folder === '' ? [] : [joinPath(folder, ADMINS_FILE), joinPath(folder, ADMINS_SIG)]);
+  const resignable = new Set<string>();
+  for (const d of boundaries) {
+    allowedExtra.add(joinPath(d, ADMINS_FILE));
+    allowedExtra.add(joinPath(d, ADMINS_SIG));
+    resignable.add(joinPath(d, GPG_ID_SIG));
+  }
   for (const c of opts.extraChanges ?? []) {
     const p = normalizePath(c.path);
-    if (reserved.has(p) || !allowedExtra.has(p) || folder === '') {
-      throw new ReencryptError(`extraChanges may not touch "${p}" (only ${[...allowedExtra].join(' and ')})`);
+    const invite = INVITE_RECORD_RE.test(p) && c.delete === true && snapshot.hasFile(p);
+    if (reserved.has(p) || !(allowedExtra.has(p) || resignable.has(p) || invite)) {
+      throw new ReencryptError(`extraChanges may not touch "${p}" (only the folder's admins file, nested boundaries' admins files / .gpg-id.sig, or an invite record deletion)`);
+    }
+    if (resignable.has(p)) {
+      const d = p.slice(0, -('/' + GPG_ID_SIG).length);
+      let bound: readonly string[];
+      try {
+        bound = c.delete ? [] : ((await parseDetachedSignature(typeof c.content === 'string' ? new TextEncoder().encode(c.content) : c.content)).notations.get(FOLDER_NOTATION) ?? []);
+      } catch {
+        bound = [];
+      }
+      if (bound.length !== 1 || bound[0] !== folderNotationValue(d)) throw new ReencryptError(`extraChanges: "${p}" must be a signature bound to "${d}"`);
     }
     reserved.add(p);
     changes.push(c);

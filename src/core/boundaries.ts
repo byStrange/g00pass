@@ -48,7 +48,19 @@ export function knownBoundaries(storeId: string): string[] {
     .sort();
 }
 
-/** Remember verified boundaries (never shrinks; reset with the pinned anchors). */
+/**
+ * Forget boundaries that a verified, non-replayed parent signature explicitly
+ * removed (`removed@g00pass`), so the device no longer requires them.
+ */
+export function forgetBoundaries(storeId: string, folders: readonly string[]): void {
+  const drop = folders.filter((f) => knownBoundaries(storeId).includes(f));
+  if (!drop.length) return;
+  updateMap(BOUNDARIES_STORAGE_KEY, isKnown, (m) => {
+    for (const f of drop) delete m[`${storeId}|${f}`];
+  });
+}
+
+/** Remember verified boundaries (only shrinks via an explicit signed removal or an anchor reset). */
 export function recordBoundaries(storeId: string, folders: readonly string[]): void {
   const fresh = folders.filter((f) => f !== '' && !knownBoundaries(storeId).includes(f));
   if (!fresh.length) return;
@@ -61,7 +73,7 @@ export function recordBoundaries(storeId: string, folders: readonly string[]): v
 const hasGpgId = (s: StoreSnapshot, f: string) => s.hasFile(joinPath(f, GPG_ID));
 
 /** Nearest strict ancestor of `folder` that has its own `.gpg-id` (root if none). */
-function parentBoundary(snapshot: StoreSnapshot, folder: string): string {
+export function parentBoundary(snapshot: StoreSnapshot, folder: string): string {
   let cur = folder;
   while (cur !== '') {
     cur = dirname(cur);
@@ -94,7 +106,7 @@ export async function allowedSigners(
 
 // ---- declared children of a COMMITTED .gpg-id ----
 
-export type DeclaredChildren = { ok: true; children: readonly string[]; created: Date | null } | Deny;
+export type DeclaredChildren = { ok: true; children: readonly string[]; removed: readonly string[]; created: Date | null } | Deny;
 
 const memo = new WeakMap<StoreSnapshot, Map<string, Promise<DeclaredChildren>>>();
 
@@ -111,7 +123,7 @@ export async function declaredChildren(snapshot: StoreSnapshot, folder: string, 
   if (!storeId) return deny('untrusted', 'store identity unknown; nothing is trusted');
   const root = await evaluateRootTrust(snapshot, signal);
   if (!root.ok) return deny(root.code, `root .gpg-id: ${root.reason}`);
-  if (f === '') return { ok: true, children: root.children, created: null };
+  if (f === '') return { ok: true, children: root.children, removed: root.removed, created: null };
   const key = `${storeId}#${snapshot.commitSha}#${f}#${root.anchors.join(',')}#${root.escrow.join(',')}`;
   let m = memo.get(snapshot);
   if (!m) memo.set(snapshot, (m = new Map()));
@@ -127,7 +139,7 @@ export async function declaredChildren(snapshot: StoreSnapshot, folder: string, 
       if (isReplayed(storeId, f, chk.created)) {
         return deny('replayed', `${folderLabel(f)}.gpg-id signature is older than one this device already accepted (rollback)`);
       }
-      return { ok: true, children: chk.children, created: chk.created };
+      return { ok: true, children: chk.children, removed: chk.removed, created: chk.created };
     })();
     m.set(key, p);
   }
@@ -182,6 +194,7 @@ export function vanishedBoundaryFor(
   target: string,
   governing: string,
   children: readonly string[],
+  removed: readonly string[] = [],
 ): Deny | null {
   for (const d of children) {
     if (isWithin(target, d) && !hasGpgId(snapshot, d)) {
@@ -189,6 +202,7 @@ export function vanishedBoundaryFor(
     }
   }
   for (const b of knownBoundaries(storeId)) {
+    if (removed.includes(b)) continue;
     if (isWithin(target, b) && !hasGpgId(snapshot, b)) {
       return deny('boundary-vanished', `${folderLabel(b)}.gpg-id was deleted (this device verified it before); writing here would encrypt to ${folderLabel(governing)} instead`);
     }
@@ -197,14 +211,19 @@ export function vanishedBoundaryFor(
 }
 
 /** Declared children of `governing` (or device-known boundaries below it) whose `.gpg-id` is gone. */
-export function vanishedChildren(snapshot: StoreSnapshot, storeId: string, governing: string, children: readonly string[]): string[] {
-  const known = knownBoundaries(storeId).filter((b) => b !== governing && isWithin(b, governing));
+export function vanishedChildren(snapshot: StoreSnapshot, storeId: string, governing: string, children: readonly string[], removed: readonly string[] = []): string[] {
+  const known = knownBoundaries(storeId).filter((b) => b !== governing && isWithin(b, governing) && !removed.includes(b));
   return [...new Set([...children, ...known])].filter((d) => !hasGpgId(snapshot, d)).sort();
 }
 
 // ---- what a NEW signature of F must declare ----
 
-export type ExpectedChildren = { ok: true; children: readonly string[] } | Deny;
+export type ExpectedChildren = {
+  ok: true;
+  children: readonly string[];
+  /** `removed@g00pass` declarations to carry forward (still absent). */
+  removed: readonly string[];
+} | Deny;
 
 /**
  * The child boundaries a re-signed `F/.gpg-id` must declare (approve, remove,
@@ -229,6 +248,7 @@ export async function expectedChildBoundaries(snapshot: StoreSnapshot, folder: s
     return deny('boundary-undeclared', `cannot create a new boundary at ${folderLabel(f)} above existing boundaries (${present.map(folderLabel).join(', ')})`);
   }
   let declared: readonly string[] = [];
+  let removed: readonly string[] = [];
   if (exists) {
     // If F's current signature does not verify, its declarations are unknown:
     // a re-sign could silently drop a deleted child. Refuse (C1 likewise
@@ -236,8 +256,9 @@ export async function expectedChildBoundaries(snapshot: StoreSnapshot, folder: s
     const dc = await declaredChildren(snapshot, f, signal);
     if (!dc.ok) return deny(dc.code, `the current ${folderLabel(f)}.gpg-id signature does not verify (${dc.reason}), so its declared child boundaries are unknown; an authorized admin must re-sign it first`);
     declared = dc.children;
+    removed = dc.removed;
   }
-  const gone = vanishedChildren(snapshot, storeId, f, declared);
+  const gone = vanishedChildren(snapshot, storeId, f, declared, removed);
   if (gone.length) {
     return deny(
       'boundary-vanished',
@@ -259,5 +280,45 @@ export async function expectedChildBoundaries(snapshot: StoreSnapshot, folder: s
       );
     }
   }
-  return { ok: true, children: present };
+  return { ok: true, children: present, removed: removed.filter((r) => !present.includes(r)) };
+}
+
+// ---- a NEW boundary declared by its parent in the same commit ----
+
+/**
+ * Create sub-folder: `folder` has no `.gpg-id` yet, and the same commit
+ * re-signs its parent boundary P (nearest ancestor with a `.gpg-id`) with
+ * `signature` over P's UNCHANGED `.gpg-id`. Accepted only if that signature
+ * is valid, bound to P, by an authorized signer of P, and declares exactly
+ * the children P must declare now plus `folder` (and carries P's removals
+ * forward); and P itself is a verified boundary. Returns P's chain.
+ */
+export async function parentDeclarationChain(
+  snapshot: StoreSnapshot,
+  folder: string,
+  decl: { readonly folder: string; readonly signature: Uint8Array },
+  root: TrustedRoot,
+  signal?: AbortSignal,
+): Promise<BoundaryChain> {
+  const f = normalizePath(folder);
+  const p = normalizePath(decl.folder);
+  if (f === '' || hasGpgId(snapshot, f)) return deny('boundary-undeclared', `${folderLabel(f)} already has a .gpg-id`);
+  if (parentBoundary(snapshot, f) !== p) return deny('boundary-undeclared', `the parent boundary of ${folderLabel(f)} is ${folderLabel(parentBoundary(snapshot, f))}, not ${folderLabel(p)}`);
+  const content = await snapshot.readFile(joinPath(p, GPG_ID), signal);
+  if (!content) return deny('boundary-undeclared', `${folderLabel(p)}.gpg-id does not exist`);
+  const { allowed } = await allowedSigners(snapshot, p, root, signal);
+  const chk = await checkGpgIdSignature(snapshot, p, content, decl.signature, allowed, signal);
+  if (!chk.ok) return deny(chk.code, `new ${folderLabel(p)}.gpg-id.sig: ${chk.reason}`);
+  const exp = await expectedChildBoundaries(snapshot, p, signal);
+  if (!exp.ok) return exp;
+  const wantChildren = [...new Set([...exp.children, f])].sort();
+  const wantRemoved = exp.removed.filter((r) => r !== f);
+  const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+  if (!same(chk.children, wantChildren) || !same(chk.removed, wantRemoved)) {
+    return deny('boundary-undeclared', `the new ${folderLabel(p)}.gpg-id.sig must declare exactly [${wantChildren.map((c) => '/' + c).join(', ')}]`);
+  }
+  if (p === '') return { ok: true, parents: [''], seen: [] };
+  const up = await boundaryChain(snapshot, p, signal);
+  if (!up.ok) return up;
+  return { ok: true, parents: [p, ...up.parents], seen: up.seen };
 }

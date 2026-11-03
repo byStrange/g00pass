@@ -45,6 +45,14 @@ export interface RecipientVerificationRequest {
    * (from the hook's `childBoundaries`, or file presence). Null for committed sets.
    */
   readonly childBoundaries: readonly string[] | null;
+  /** Proposed sets: the `removed@g00pass` declarations the new signature carries forward. */
+  readonly removedBoundaries?: readonly string[] | null;
+  /**
+   * Proposed sets for a NEW boundary only (create sub-folder): the parent's
+   * new signature (over its unchanged `.gpg-id`) committed in the same
+   * commit, which must declare this folder as a child.
+   */
+  readonly parentDeclaration?: { readonly folder: string; readonly signature: Uint8Array } | null;
   /** Exact `.gpg-id` bytes (current, or the proposed new content). */
   readonly gpgIdContent: Uint8Array;
   /** Bytes of the detached signature `.gpg-id.sig` (current or proposed), if any. */
@@ -61,7 +69,7 @@ export type TrustDecision =
   | { ok: false; code: TrustErrorCode; reason: string };
 
 export type ChildBoundaryDecision =
-  | { ok: true; children: readonly string[] }
+  | { ok: true; children: readonly string[]; removed?: readonly string[] }
   | { ok: false; code: TrustErrorCode; reason: string };
 
 export interface TrustHook {
@@ -225,7 +233,7 @@ export interface ProposedRecipients {
 }
 
 /** Signer callback: receives the exact final `.gpg-id` text and the child boundaries to declare. */
-export type GpgIdSigner = (gpgIdText: string, ctx: { folder: string; children: readonly string[] }) => Promise<Uint8Array>;
+export type GpgIdSigner = (gpgIdText: string, ctx: { folder: string; children: readonly string[]; removed: readonly string[] }) => Promise<Uint8Array>;
 
 /**
  * Verify a NEW recipient list for `folder` (approve / remove member /
@@ -247,6 +255,8 @@ export async function verifyProposedRecipients(
      * declare, and returns signature bytes.
      */
     signature?: Uint8Array | null | GpgIdSigner;
+    /** New boundary: the parent's same-commit declaration (see RecipientVerificationRequest). */
+    parentDeclaration?: { folder: string; signature: Uint8Array };
     signal?: AbortSignal;
   } = {},
 ): Promise<ProposedRecipients> {
@@ -262,6 +272,7 @@ export async function verifyProposedRecipients(
   if (escrow.some((fp) => !have.has(fp))) throw new TrustError(f, 'escrow recipient missing', 'escrow-missing');
 
   let children: readonly string[];
+  let removed: readonly string[] = [];
   if (installedHook.childBoundaries) {
     let cb: ChildBoundaryDecision;
     try {
@@ -274,12 +285,13 @@ export async function verifyProposedRecipients(
       throw new TrustError(f, d?.reason ?? 'child boundaries rejected by trust hook', d?.code ?? 'untrusted');
     }
     children = [...cb.children];
+    removed = [...(cb.removed ?? [])];
   } else {
     children = directNestedGpgIdFolders(snapshot, f);
   }
 
   const signature =
-    typeof opts.signature === 'function' ? await opts.signature(gpgIdText, { folder: f, children }) : (opts.signature ?? null);
+    typeof opts.signature === 'function' ? await opts.signature(gpgIdText, { folder: f, children, removed }) : (opts.signature ?? null);
 
   const verified = await runHook(
     {
@@ -287,6 +299,8 @@ export async function verifyProposedRecipients(
       gpgIdPath,
       target: f,
       childBoundaries: children,
+      removedBoundaries: removed,
+      parentDeclaration: opts.parentDeclaration ?? null,
       gpgIdContent: new TextEncoder().encode(gpgIdText),
       gpgIdSignature: signature,
       proposed: true,

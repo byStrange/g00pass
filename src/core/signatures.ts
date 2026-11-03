@@ -33,6 +33,13 @@ export const FOLDER_NOTATION = 'folder@g00pass';
  * signed state, so deleting a nested `.gpg-id` cannot silently widen access.
  */
 export const CHILD_NOTATION = 'child@g00pass';
+/**
+ * Explicit, signed removal of a former child boundary (gpg-id-signatures.md
+ * §Removing a sub-folder): `removed@g00pass=/<folder>`. Devices that verified
+ * that boundary before accept its absence only when the parent's current
+ * verified signature carries this notation; re-signs carry it forward.
+ */
+export const REMOVED_NOTATION = 'removed@g00pass';
 /** Allowed clock skew for signature creation times in the future. */
 export const MAX_FUTURE_SKEW_MS = 5 * 60_000;
 const MAX_SIGNATURE_BYTES = 16 * 1024;
@@ -243,6 +250,28 @@ export function childBoundariesFromNotations(values: readonly string[], folder: 
 }
 
 /**
+ * Validate the `removed@g00pass` values of a `.gpg-id.sig` for `folder`:
+ * normalized strict descendants, unique, and not also declared as children.
+ */
+export function removedBoundariesFromNotations(values: readonly string[], folder: string, children: readonly string[]): string[] | string {
+  const f = normalizePath(folder);
+  const out: string[] = [];
+  for (const v of values) {
+    let c: string;
+    try {
+      c = v.startsWith('/') ? normalizePath(v.slice(1)) : '';
+    } catch {
+      c = '';
+    }
+    if (c === '' || c !== v.slice(1) || c === f || !isWithin(c, f)) return `${REMOVED_NOTATION} "${v}" is not a folder below "${folderNotationValue(f)}"`;
+    if (out.includes(c)) return `duplicate ${REMOVED_NOTATION} "${v}"`;
+    if (children.includes(c)) return `${REMOVED_NOTATION} "${v}" is also declared as a child`;
+    out.push(c);
+  }
+  return out.sort();
+}
+
+/**
  * Sign a `.gpg-id` exactly as g00pass verifies it: binary detached signature
  * over the exact bytes, bound to `folder` by the `folder@g00pass` notation,
  * declaring the direct child boundaries with one `child@g00pass` notation
@@ -255,12 +284,19 @@ export async function signGpgId(
   gpgId: string | Uint8Array,
   folder: string,
   signingKey: PrivateKey,
-  opts: { date?: Date; children?: readonly string[] } = {},
+  opts: { date?: Date; children?: readonly string[]; removed?: readonly string[] } = {},
 ): Promise<Uint8Array> {
   const bytes = typeof gpgId === 'string' ? new TextEncoder().encode(gpgId) : gpgId;
   const children = [...new Set((opts.children ?? []).map((c) => normalizePath(c)))].sort();
   const bad = childBoundariesFromNotations(children.map(folderNotationValue), folder);
   if (typeof bad === 'string') throw new G00passError(bad);
-  const notations: [string, string][] = [[FOLDER_NOTATION, folderNotationValue(folder)], ...children.map((c): [string, string] => [CHILD_NOTATION, folderNotationValue(c)])];
+  const removed = [...new Set((opts.removed ?? []).map((c) => normalizePath(c)))].sort();
+  const badR = removedBoundariesFromNotations(removed.map(folderNotationValue), folder, children);
+  if (typeof badR === 'string') throw new G00passError(badR);
+  const notations: [string, string][] = [
+    [FOLDER_NOTATION, folderNotationValue(folder)],
+    ...children.map((c): [string, string] => [CHILD_NOTATION, folderNotationValue(c)]),
+    ...removed.map((c): [string, string] => [REMOVED_NOTATION, folderNotationValue(c)]),
+  ];
   return signDetached(bytes, signingKey, { notations, date: opts.date });
 }

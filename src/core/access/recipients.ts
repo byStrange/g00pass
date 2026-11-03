@@ -3,10 +3,15 @@ import { canonicalJson, sha256Digest } from '../canonical';
 import { G00passError, RecipientKeyError, TrustError } from '../errors';
 import { ESCROW_FLAG, type GpgIdLine, normalizeKeyId } from '../gpgid';
 import { fingerprintOf, parsePublicKey } from '../keys';
-import { GPG_ID, PUBLIC_KEYS_DIR, joinPath, normalizePath } from '../paths';
+import { GPG_ID, GPG_ID_SIG, PUBLIC_KEYS_DIR, joinPath, normalizePath } from '../paths';
 import { type ReencryptOptions, type ReencryptProgress, type ReencryptResult, reencryptFolder } from '../reencrypt';
 import { sanitizeDisplayText } from '../requests/parse';
-import { type StoreSnapshot, type StoreWriter, listGovernedEntries } from '../store';
+import { type FileChange, type StoreSnapshot, type StoreWriter, listGovernedEntries, nestedGpgIdFolders } from '../store';
+import { ADMINS_FILE, ADMINS_SIG, signAdminsFile, verifyAdminsFile } from '../admins';
+import { checkGpgIdSignature, evaluateRootTrust } from '../anchors';
+import { allowedSigners } from '../boundaries';
+import { type RotationDocument, readRotation, rotationPath, serializeRotation } from '../rotation';
+import { trustEnvironment } from '../trust-env';
 import { signGpgId } from '../signatures';
 import { escrowRecipientIds, getTrustHook, verifyRecipients } from '../trust';
 import { idMatchesFingerprint, readRecipientLines } from './folders';
@@ -14,8 +19,14 @@ import { idMatchesFingerprint, readRecipientLines } from './folders';
 export interface RecipientChange {
   /** Recipients to add; `publicKey` is committed to `.public-keys/<FPR>`. */
   add?: readonly { fingerprint: string; publicKey: string }[];
-  /** Fingerprints (40 hex) to remove. The escrow recipient can never be removed. */
+  /**
+   * Fingerprints (40 hex) to remove. The escrow recipient can never be
+   * removed. A removed recipient listed in the folder's own admins file is
+   * removed from it too (removing someone removes all of their rights there).
+   */
   remove?: readonly string[];
+  /** Changes to the folder's own `.g00pass-admins.json` (signed in the same commit). */
+  admins?: { add?: readonly string[]; remove?: readonly string[] };
 }
 
 export type RecipientChangeErrorCode =
@@ -60,6 +71,17 @@ export interface RecipientChangePlan {
   readonly droppedEscrow: readonly string[];
   /** Child boundaries the new signature will declare. */
   readonly childBoundaries: readonly string[];
+  /**
+   * The folder's own admins file before → after (verified admins; null =
+   * no file), or null when the admins file does not change.
+   */
+  readonly admins: { readonly before: readonly string[] | null; readonly after: readonly string[] | null } | null;
+  /**
+   * Nested boundaries (`.gpg-id` and/or admins file) that are re-signed by the
+   * operator in the same commit because their current signer loses admin
+   * rights with this change (otherwise they would stop verifying).
+   */
+  readonly resign: readonly { readonly folder: string; readonly gpgId: boolean; readonly adminsFile: boolean }[];
   /** `sha256:` over the canonical {folder, before, after}: what the operator approves. */
   readonly digest: string;
   /** Warnings of the current set (e.g. `escrow-missing`, which this change repairs). */
@@ -69,6 +91,10 @@ export interface RecipientChangePlan {
 interface InternalPlan extends RecipientChangePlan {
   readonly lines: GpgIdLine[];
   readonly pending: Map<string, string>;
+  /** Re-sign inputs: children / removals each nested `.gpg-id` declares now. */
+  readonly resignChildren: ReadonlyMap<string, { children: readonly string[]; removed: readonly string[] }>;
+  /** Current verified admins of nested admins files that are re-signed. */
+  readonly resignAdmins: ReadonlyMap<string, readonly string[]>;
 }
 
 export interface ChangeRecipientsOptions {
@@ -87,6 +113,14 @@ export interface ChangeRecipientsOptions {
   armor?: boolean;
   extraChanges?: ReencryptOptions['extraChanges'];
   replaceEntries?: ReencryptOptions['replaceEntries'];
+  /**
+   * Update the folder's rotation file (rotation.md) in the same commit: gets
+   * the current document (decrypted with `operatorKey`, or the empty default)
+   * and returns the new one.
+   */
+  rotation?: (doc: RotationDocument) => RotationDocument;
+  /** Clock for signatures / rotation timestamps (default: trust environment). */
+  now?: Date;
   chunkSize?: number;
   onProgress?: (p: ReencryptProgress) => void;
   signal?: AbortSignal;
@@ -202,6 +236,47 @@ async function buildPlan(
   }
   if (lines.length === 0) throw new RecipientChangeError('invalid-change', 'Refusing to leave the folder with only the escrow recipient');
 
+  // ---- the folder's own admins file ----
+  const adminsFile = await verifyAdminsFile(snapshot, f, opts.signal);
+  const adminsBefore = adminsFile.status === 'valid' ? [...adminsFile.admins].sort() : null;
+  const adminAdd = (change.admins?.add ?? []).map((a) => a.toUpperCase());
+  const adminRemove = new Set((change.admins?.remove ?? []).map((a) => a.toUpperCase()));
+  for (const r of remove) if (adminsBefore?.includes(r)) adminRemove.add(r);
+  let admins: InternalPlan['admins'] = null;
+  if (adminAdd.length || adminRemove.size) {
+    if (adminsFile.status === 'invalid') {
+      throw new RecipientChangeError('folder-not-verified', `The admins file of "${f}" is not valid (${adminsFile.reason}); a global admin must re-sign it first`);
+    }
+    for (const a of [...adminAdd, ...adminRemove]) if (!FPR_RE.test(a)) throw new RecipientChangeError('invalid-change', 'Invalid admin fingerprint');
+    if (escrow.some((e) => adminAdd.includes(e))) throw new RecipientChangeError('invalid-change', 'The escrow key can never be an admin');
+    if (adminRemove.has(operatorFpr)) throw new RecipientChangeError('invalid-change', 'You cannot remove yourself as an admin here; ask another admin');
+    for (const r of adminRemove) if (!adminsBefore?.includes(r)) throw new RecipientChangeError('invalid-change', 'Fingerprint to remove is not an admin of this folder');
+    const after = [...new Set([...(adminsBefore ?? []), ...adminAdd])].filter((a) => !adminRemove.has(a)).sort();
+    admins = { before: adminsBefore, after: after.length ? after : null };
+  }
+
+  // ---- nested boundaries signed by someone who loses admin rights ----
+  const resignChildren = new Map<string, { children: readonly string[]; removed: readonly string[] }>();
+  const resignAdmins = new Map<string, readonly string[]>();
+  if (adminRemove.size) {
+    const root = await evaluateRootTrust(snapshot, opts.signal);
+    const lost = [...adminRemove].filter((a) => !(root.ok && root.anchors.includes(a)));
+    for (const d of nestedGpgIdFolders(snapshot, f)) {
+      if (root.ok) {
+        const content = await snapshot.readFile(joinPath(d, GPG_ID), opts.signal);
+        const sig = await snapshot.readFile(joinPath(d, GPG_ID_SIG), opts.signal);
+        const { allowed } = await allowedSigners(snapshot, d, root, opts.signal);
+        const chk = content ? await checkGpgIdSignature(snapshot, d, content, sig, allowed, opts.signal) : null;
+        if (chk?.ok && lost.includes(chk.signer)) resignChildren.set(d, { children: chk.children, removed: chk.removed });
+      }
+      const af = await verifyAdminsFile(snapshot, d, opts.signal);
+      if (af.status === 'valid' && lost.includes(af.signer)) resignAdmins.set(d, af.admins);
+    }
+  }
+  const resign = [...new Set([...resignChildren.keys(), ...resignAdmins.keys()])]
+    .sort()
+    .map((d) => ({ folder: d, gpgId: resignChildren.has(d), adminsFile: resignAdmins.has(d) }));
+
   const hook = getTrustHook();
   let childBoundaries: readonly string[] = [];
   if (hook.childBoundaries) {
@@ -228,13 +303,15 @@ async function buildPlan(
       canonicalJson({
         after: after.map((a) => ({ escrow: a.escrow, fingerprint: a.fingerprint })),
         before: before.map((b) => ({ escrow: b.escrow, fingerprint: b.fingerprint })),
+        admins,
         childBoundaries: [...childBoundaries],
         folder: f,
+        resign,
         type: 'g00pass.recipient-change',
       }),
     ),
   );
-  return { folder: f, before, after, added, removed, droppedEscrow, childBoundaries, digest, warnings, lines, pending };
+  return { folder: f, before, after, added, removed, droppedEscrow, childBoundaries, admins, resign, digest, warnings, lines, pending, resignChildren, resignAdmins };
 }
 
 /**
@@ -267,15 +344,37 @@ export async function changeFolderRecipients(
   const opKeyPath = joinPath(PUBLIC_KEYS_DIR, operatorFpr);
   if (!snapshot.hasFile(opKeyPath) && !pending.has(operatorFpr)) pending.set(operatorFpr, operatorKey.toPublic().armor());
 
+  const date = opts.now ?? trustEnvironment().now();
+  const extra: FileChange[] = [...(opts.extraChanges ?? [])];
+  if (plan.admins) {
+    if (plan.admins.after) {
+      extra.push(...(await signAdminsFile({ snapshot, folder: f, admins: plan.admins.after, signingKey: operatorKey, date, signal: opts.signal })).changes);
+    } else {
+      extra.push({ path: joinPath(f, ADMINS_FILE), delete: true }, { path: joinPath(f, ADMINS_SIG), delete: true });
+    }
+  }
+  for (const [d, decl] of plan.resignChildren) {
+    const text = await snapshot.readFile(joinPath(d, GPG_ID), opts.signal);
+    if (text) extra.push({ path: joinPath(d, GPG_ID_SIG), content: await signGpgId(text, d, operatorKey, { ...decl, date }) });
+  }
+  for (const [d, admins] of plan.resignAdmins) {
+    extra.push(...(await signAdminsFile({ snapshot, folder: d, admins, signingKey: operatorKey, date, signal: opts.signal })).changes);
+  }
+  const replaceEntries = [...(opts.replaceEntries ?? [])];
+  if (opts.rotation) {
+    const doc = opts.rotation(await readRotation(snapshot, f, [operatorKey], opts.signal));
+    replaceEntries.push({ path: rotationPath(f), plaintext: serializeRotation(doc) });
+  }
+
   const total = listGovernedEntries(snapshot, f).length;
   return reencryptFolder(f, plan.lines, {
     snapshot,
     writer: opts.writer,
     decryptionKeys: [operatorKey],
     pendingKeys: pending,
-    gpgIdSignature: (text, ctx) => signGpgId(text, f, operatorKey, { children: ctx.children }),
-    replaceEntries: opts.replaceEntries,
-    extraChanges: opts.extraChanges,
+    gpgIdSignature: (text, ctx) => signGpgId(text, f, operatorKey, { children: ctx.children, removed: ctx.removed }),
+    replaceEntries,
+    extraChanges: extra,
     message: opts.message,
     chunkSize: opts.chunkSize,
     armor: opts.armor ?? total > ARMOR_THRESHOLD,

@@ -40,3 +40,7 @@ export { idMatchesFingerprint, isFolderRecipient, readRecipientLines } from './a
 export * from './access/recipients';
 export * from './access/approve';
 export * from './access/inbox';
+// Phase 2: rotation tracking, remove member.
+export * from './rotation';
+export * from './access/remove';
+export * from './access/subfolders';

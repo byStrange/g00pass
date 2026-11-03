@@ -16,9 +16,11 @@ import type { ReencryptProgress, ReencryptResult } from '../reencrypt';
 import type { StoreSnapshot, StoreWriter } from '../store';
 import { joinPath } from '../paths';
 import { GPG_ID } from '../paths';
-import { checkFolderAdmin, signAdminsFile, verifyAdminsFile } from '../admins';
+import { checkFolderAdmin } from '../admins';
+import { recordMemberAdded } from '../rotation';
+import { trustEnvironment } from '../trust-env';
 import { isFolderRecipient } from './folders';
-import { type RecipientChangePlan, RecipientChangeError, changeFolderRecipients, planFolderRecipientChange } from './recipients';
+import { type RecipientChange, type RecipientChangePlan, RecipientChangeError, changeFolderRecipients, planFolderRecipientChange } from './recipients';
 
 export type ApprovalErrorCode =
   | 'not-parsed'
@@ -90,19 +92,12 @@ export interface ApprovalResult {
   result: ReencryptResult;
 }
 
-/** Next signed admins file for `folder` with `add` merged into the currently VERIFIED admins of that exact folder. */
-async function folderAdminsUpdate(
-  snapshot: StoreSnapshot,
-  folder: string,
-  add: string,
-  signingKey: PrivateKey,
-  date: Date | undefined,
-  signal: AbortSignal | undefined,
-) {
-  const file = await verifyAdminsFile(snapshot, folder, signal);
-  if (file.status === 'invalid') throw new ApprovalError('not-admin', `Existing admins file is not valid: ${file.reason}`);
-  const existing = file.status === 'valid' ? file.admins : [];
-  return (await signAdminsFile({ snapshot, folder, admins: [...existing, add], signingKey, date, signal })).changes;
+/** The recipient change an approval makes (preview and commit MUST use the same). */
+function approvalChange(req: ParsedAccessRequest): RecipientChange {
+  return {
+    add: [{ fingerprint: req.fingerprint, publicKey: req.publicKey }],
+    admins: req.role === 'folder-admin' ? { add: [req.fingerprint] } : undefined,
+  };
 }
 
 const asApprovalError = (e: unknown): never => {
@@ -118,7 +113,7 @@ const asApprovalError = (e: unknown): never => {
 export async function previewApproval(snapshot: StoreSnapshot, req: ParsedAccessRequest, operatorFpr: string, signal?: AbortSignal): Promise<RecipientChangePlan> {
   if (!isParsedAccessRequest(req)) throw new ApprovalError('not-parsed', 'Request was not produced by the verified parser');
   await assertCanApprove(snapshot, req, operatorFpr);
-  return planFolderRecipientChange(snapshot, req.folder, { add: [{ fingerprint: req.fingerprint, publicKey: req.publicKey }] }, { operatorFingerprint: operatorFpr, signal }).catch(asApprovalError);
+  return planFolderRecipientChange(snapshot, req.folder, approvalChange(req), { operatorFingerprint: operatorFpr, signal }).catch(asApprovalError);
 }
 
 /** Re-check authority against `snapshot`; throws ApprovalError. */
@@ -168,18 +163,16 @@ export async function approveAccessRequest(req: ParsedAccessRequest, opts: Appro
     async () => {
       const snapshot = await opts.loadSnapshot(opts.signal);
       await assertCanApprove(snapshot, req, operatorFingerprint);
-      const extraChanges =
-        req.role === 'folder-admin'
-          ? [...(await folderAdminsUpdate(snapshot, req.folder, req.fingerprint, opts.operatorKey, opts.now, opts.signal))]
-          : [];
+      const now = opts.now ?? trustEnvironment().now();
       return changeFolderRecipients(
         req.folder,
-        { add: [{ fingerprint: req.fingerprint, publicKey: req.publicKey }] },
+        approvalChange(req),
         {
           snapshot,
           writer: opts.writer,
           operatorKey: opts.operatorKey,
-          extraChanges,
+          now,
+          rotation: (doc) => recordMemberAdded(doc, { fingerprint: req.fingerprint, name: req.name, addedBy: operatorFingerprint, request: opts.requestRef }, now),
           approvedPlanDigest: opts.confirmation.approvedPlan,
           armor: opts.armor,
           message: `g00pass: grant ${req.fingerprint.slice(-16)} ${req.role} on ${req.folder} (${opts.requestRef})`,

@@ -6,6 +6,8 @@ import { GPG_ID, GPG_ID_SIG } from './paths';
 import {
   CHILD_NOTATION,
   FOLDER_NOTATION,
+  REMOVED_NOTATION,
+  removedBoundariesFromNotations,
   SignatureFormatError,
   childBoundariesFromNotations,
   folderNotationValue,
@@ -167,6 +169,8 @@ export type GpgIdSignatureCheck =
       created: Date;
       /** Direct child boundaries declared by the signature (`child@g00pass`), sorted. */
       children: readonly string[];
+      /** Former boundaries explicitly removed (`removed@g00pass`), sorted. */
+      removed: readonly string[];
     }
   | { ok: false; code: TrustErrorCode; reason: string; signer?: string };
 
@@ -219,7 +223,11 @@ export async function checkGpgIdSignature(
   if (typeof children === 'string') {
     return { ok: false, code: 'signature-invalid', reason: `invalid child boundary declaration: ${children}`, signer: res.signer.fingerprint };
   }
-  return { ok: true, signer: res.signer.fingerprint, created: res.signer.created, children };
+  const removed = removedBoundariesFromNotations(parsed.notations.get(REMOVED_NOTATION) ?? [], folder, children);
+  if (typeof removed === 'string') {
+    return { ok: false, code: 'signature-invalid', reason: `invalid boundary removal: ${removed}`, signer: res.signer.fingerprint };
+  }
+  return { ok: true, signer: res.signer.fingerprint, created: res.signer.created, children, removed };
 }
 
 /** At most this many key files are parsed to name an unauthorized signer (error messages only). */
@@ -302,6 +310,8 @@ export type RootTrust =
       readonly signer: string;
       /** Direct child boundaries declared by the root `.gpg-id.sig`. */
       readonly children: readonly string[];
+      /** Former boundaries the root signature explicitly removed. */
+      readonly removed: readonly string[];
       /** True when this evaluation re-pinned the anchors (validly signed change). */
       readonly rolledOver: boolean;
       readonly root: RootRecipients;
@@ -377,5 +387,5 @@ export async function evaluateRootTrust(snapshot: StoreSnapshot, signal?: AbortS
     clearDerivedState(storeId, { seen: false, admins: true });
     rolledOver = true;
   }
-  return { ok: true, anchors: root.admins, escrow: root.escrow, signer: chk.signer, children: chk.children, rolledOver, root };
+  return { ok: true, anchors: root.admins, escrow: root.escrow, signer: chk.signer, children: chk.children, removed: chk.removed, rolledOver, root };
 }

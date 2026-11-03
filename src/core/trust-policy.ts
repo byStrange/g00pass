@@ -1,5 +1,14 @@
 import { checkGpgIdSignature, evaluateRootTrust, folderLabel, gpgIdDigest, isReplayed, recordSeen } from './anchors';
-import { allowedSigners, boundaryChain, expectedChildBoundaries, recordBoundaries, vanishedBoundaryFor, vanishedChildren } from './boundaries';
+import {
+  allowedSigners,
+  boundaryChain,
+  expectedChildBoundaries,
+  forgetBoundaries,
+  parentDeclarationChain,
+  recordBoundaries,
+  vanishedBoundaryFor,
+  vanishedChildren,
+} from './boundaries';
 import { G00passError, RecipientKeyError, TrustError, type TrustErrorCode } from './errors';
 import { keyIdKind, normalizeKeyId } from './gpgid';
 import { GPG_ID, GPG_ID_SIG, dirname, joinPath } from './paths';
@@ -62,6 +71,7 @@ async function decide(req: RecipientVerificationRequest): Promise<TrustDecision>
   // honours the signer of a rollover); only reuse that for the exact bytes.
   let seen: Date | null = null;
   let children: readonly string[];
+  let removed: readonly string[];
   const isCommittedRoot =
     folder === '' &&
     !req.proposed &&
@@ -69,6 +79,7 @@ async function decide(req: RecipientVerificationRequest): Promise<TrustDecision>
     sameBytes(req.gpgIdSignature, await snapshot.readFile(GPG_ID_SIG));
   if (isCommittedRoot) {
     children = root.children;
+    removed = root.removed;
   } else {
     const chk = await checkGpgIdSignature(snapshot, folder, req.gpgIdContent, req.gpgIdSignature, allowed);
     if (!chk.ok) return deny(chk.code, chk.reason);
@@ -77,14 +88,24 @@ async function decide(req: RecipientVerificationRequest): Promise<TrustDecision>
     }
     seen = chk.created;
     children = chk.children;
+    removed = chk.removed;
   }
 
-  // Trust boundaries (gpg-id-signatures.md §Child boundaries).
-  const chain = await boundaryChain(snapshot, folder);
+  // Trust boundaries (gpg-id-signatures.md §Child boundaries). A NEW boundary
+  // (create sub-folder) is declared by its parent's signature in the same commit.
+  const chain =
+    req.proposed && req.parentDeclaration
+      ? await parentDeclarationChain(snapshot, folder, req.parentDeclaration, root)
+      : await boundaryChain(snapshot, folder);
   if (!chain.ok) return deny(chain.code, chain.reason);
+  // An explicit, verified removal releases the device-known boundary.
+  if (!req.proposed && removed.length) forgetBoundaries(storeId, removed);
   if (req.proposed) {
     const exp = await expectedChildBoundaries(snapshot, folder);
     if (!exp.ok) return deny(exp.code, exp.reason);
+    if (!sameList(removed, exp.removed) || (req.removedBoundaries && !sameList(req.removedBoundaries, exp.removed))) {
+      return deny('boundary-undeclared', `the new ${folderLabel(folder)}.gpg-id.sig must carry the boundary removals [${exp.removed.map((c) => '/' + c).join(', ')}] forward (removed@g00pass)`);
+    }
     if (!sameList(children, exp.children) || (req.childBoundaries && !sameList(req.childBoundaries, exp.children))) {
       const list = (l: readonly string[]) => (l.length ? l.map((c) => '/' + c).join(', ') : 'none');
       return deny(
@@ -93,9 +114,9 @@ async function decide(req: RecipientVerificationRequest): Promise<TrustDecision>
       );
     }
   } else {
-    const gone = vanishedBoundaryFor(snapshot, storeId, req.target, folder, children);
+    const gone = vanishedBoundaryFor(snapshot, storeId, req.target, folder, children, removed);
     if (gone) return deny(gone.code, gone.reason);
-    for (const d of vanishedChildren(snapshot, storeId, folder, children)) warnings.push(`boundary-vanished:${d}`);
+    for (const d of vanishedChildren(snapshot, storeId, folder, children, removed)) warnings.push(`boundary-vanished:${d}`);
   }
 
   const fprs = new Set<string>();
@@ -126,7 +147,7 @@ async function decide(req: RecipientVerificationRequest): Promise<TrustDecision>
 export const signatureTrustHook: TrustHook = Object.freeze({
   name: SIGNATURE_TRUST_HOOK_NAME,
   verify: decide,
-  childBoundaries: (snapshot: StoreSnapshot, folder: string, signal?: AbortSignal) => expectedChildBoundaries(snapshot, folder, signal),
+  childBoundaries: async (snapshot: StoreSnapshot, folder: string, signal?: AbortSignal) => expectedChildBoundaries(snapshot, folder, signal),
 });
 
 export interface FolderTrustStatus {
