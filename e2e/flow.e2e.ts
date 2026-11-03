@@ -59,7 +59,6 @@ const status = (p: Page) => p.locator('p.status');
 async function waitStatus(p: Page, re: RegExp, timeout = 60_000) {
   await expect.poll(async () => (await status(p).textContent()) ?? '', { timeout, interval: 200 }).toMatch(re);
 }
-const card = (p: Page, title: string) => p.locator('section.card', { has: p.locator('h2', { hasText: title }) });
 const pages: Page[] = [];
 async function count(l: Locator, n: number, timeout = 30_000) {
   try {
@@ -73,29 +72,36 @@ async function count(l: Locator, n: number, timeout = 30_000) {
     throw e;
   }
 }
-const shot = (l: Locator, name: string) => l.screenshot({ path: join(shots, `${name}.png`) });
+const shot = (p: Page, name: string) => p.screenshot({ path: join(shots, `${name}.png`) });
 
-async function configure(p: Page, token: string) {
-  await p.fill('input[name=owner]', 'acme');
-  await p.fill('input[name=repo]', 'demo-store');
-  await p.fill('input[name=branch]', 'main');
-  await p.fill('input[name=requestsRepo]', REQUESTS);
-  await p.fill('input[name=token]', token);
-  await p.getByRole('button', { name: 'Save & load' }).click();
+
+const screenTitle = (p: Page) => p.locator('.screen-title');
+async function onScreen(p: Page, title: RegExp, timeout = 60_000) {
+  await expect.poll(async () => ((await screenTitle(p).count()) ? ((await screenTitle(p).first().textContent()) ?? '') : ''), { timeout, interval: 200 }).toMatch(title);
 }
-
+async function tabTo(p: Page, name: string) {
+  await p.getByRole('tab', { name: new RegExp(`^${name}`) }).click();
+}
+/** Wait until the requests panel finished loading (its Refresh button is enabled again). */
+async function inboxIdle(p: Page) {
+  await expect.poll(() => p.locator('.inbox').getByRole('button', { name: 'Refresh' }).isEnabled(), { timeout: 30_000, interval: 200 }).toBe(true);
+}
 async function unlock(p: Page, passphrase: string) {
-  const c = card(p, 'Device key');
-  await c.getByPlaceholder('Passphrase').fill(passphrase);
-  await c.getByRole('button', { name: 'Unlock' }).click();
-  await waitStatus(p, /Unlocked/);
+  await onScreen(p, /Unlock/);
+  await p.getByLabel('Passphrase').fill(passphrase);
+  await p.getByRole('button', { name: 'Unlock' }).click();
+  await p.getByRole('tab', { name: /^Secrets/ }).waitFor({ timeout: 60_000 });
 }
-
 async function reveal(p: Page, entry: string): Promise<string> {
-  await card(p, 'Entries').getByRole('button', { name: entry, exact: true }).click();
-  const view = p.locator('section.entry');
-  await view.getByRole('button', { name: 'Reveal / hide' }).click();
-  return (await view.locator('code.secret').textContent()) ?? '';
+  await p.getByRole('button', { name: entry, exact: true }).click();
+  const detail = p.locator('section.detail');
+  await detail.getByRole('button', { name: 'Show' }).click();
+  return (await detail.locator('code.secret').textContent()) ?? '';
+}
+async function openFolder(p: Page, folder: string) {
+  await tabTo(p, 'Access');
+  await p.locator('.folder-btn', { hasText: new RegExp(`^${folder}$`) }).click();
+  await p.locator('.folder-admin h3').first().waitFor({ timeout: 30_000 });
 }
 
 beforeAll(async () => {
@@ -114,116 +120,119 @@ afterAll(async () => {
 });
 
 describe('g00pass in the browser (demo store, fake GitHub)', () => {
-  it('admin pins anchors, decrypts, invites; newcomer enrolls; admin approves; newcomer decrypts; admin removes them', async () => {
+  it('admin sets up, decrypts, invites; newcomer joins; admin approves; newcomer decrypts; admin removes them', async () => {
     const admin = demo.identities.find((i) => i.role === 'admin')!;
     const A = await profile();
     const p = A.page;
 
-    // ---- admin: connect, pin the global admins, import key, decrypt ----
+    // ---- admin: setup wizard ----
     await p.goto(APP);
-    await configure(p, ADMIN_TOKEN);
-    const trust = card(p, 'Recipient trust');
-    await trust.getByText('I compared these fingerprints with my admin and they match.').click();
-    await shot(trust, '01-admin-pin-anchors');
-    await trust.getByRole('button', { name: 'Pin these global admins' }).click();
-    await count(trust.locator('li.ok'), 4);
-    const keyCard = card(p, 'Device key');
-    await keyCard.locator('textarea').fill(admin.privateKey);
-    await keyCard.getByRole('button', { name: 'Store key' }).click();
-    await waitStatus(p, /Key stored/);
+    await onScreen(p, /Connect your password store/);
+    await p.getByLabel('Store repository').fill(STORE);
+    await p.getByLabel('GitHub token').fill(ADMIN_TOKEN);
+    await p.getByText('More settings').click();
+    await p.getByLabel('Requests repository').fill(REQUESTS);
+    await shot(p, '01-setup-connect');
+    await p.getByRole('button', { name: 'Connect' }).click();
+
+    await onScreen(p, /Check who the admins are/);
+    await p.getByText('I compared the fingerprints and they match.').click();
+    await shot(p, '02-setup-verify-admins');
+    await p.getByRole('button', { name: /These are my admins/ }).click();
+
+    await onScreen(p, /Your personal key/);
+    await p.getByLabel('Paste your private key').fill(admin.privateKey);
+    await shot(p, '03-setup-key');
+    await p.getByRole('button', { name: 'Use this key' }).click();
     await unlock(p, admin.passphrase);
     expect(await reveal(p, 'team/wiki')).toBe('correct-horse-battery');
-    await shot(p.locator('section.entry'), '02-admin-decrypt');
+    await shot(p, '04-secrets');
 
     // ---- admin: invite someone to team/ ----
-    const folders = card(p, 'Manage folder');
-    await folders.getByLabel('Folder', { exact: true }).selectOption('team');
-    await folders.getByRole('button', { name: 'Open' }).click();
-    await folders.getByText('Invite someone to team/').click();
-    await folders.getByPlaceholder(/github_pat_/).fill(INVITE_TOKEN);
-    await folders.getByRole('button', { name: 'Check token & create invite' }).click();
-    const linkBox = folders.locator('textarea[readonly]');
-    await count(linkBox, 1, 30_000);
+    await openFolder(p, 'team/');
+    await p.getByText('Invite someone to team/').click();
+    await p.getByPlaceholder(/github_pat_/).fill(INVITE_TOKEN);
+    await p.getByRole('button', { name: 'Check token & create invite' }).click();
+    const linkBox = p.locator('textarea[readonly]');
+    await count(linkBox, 1);
     const link = await linkBox.inputValue();
     expect(link.startsWith(`${APP}#g00pass-invite=`)).toBe(true);
-    await shot(folders, '03-admin-invite');
+    await shot(p, '05-access-invite');
 
-    // ---- newcomer: open the invite, pin anchors, create key, request ----
+    // ---- newcomer: invite flow ----
     const B = await profile();
     const q = B.page;
     await q.goto(link);
     expect(new URL(q.url()).hash).toBe(''); // fragment stripped at once
-    const inv = card(q, 'You were invited');
-    expect((await inv.locator('li.mono').allTextContents()).map((t) => t.replace(/\s+/g, ''))).toEqual([admin.fingerprint]);
-    await shot(inv, '04-newcomer-invite');
-    await inv.getByText('I compared these fingerprints with my admin and they match.').click();
-    await inv.getByRole('button', { name: 'Accept invite' }).click();
-    await waitStatus(q, /Invite accepted/);
-    const enroll = card(q, 'Get access');
+    await onScreen(q, /invited/);
+    expect((await q.locator('.admin-list .mono').allTextContents()).map((t) => t.replace(/\s+/g, ''))).toEqual([admin.fingerprint]);
+    await shot(q, '06-join-check-admins');
+    await q.getByText('The fingerprint matches what my admin told me.').click();
+    await q.getByRole('button', { name: 'Continue' }).click();
+
+    await onScreen(q, /Create your key/);
     const NEW_PASS = 'newcomer passphrase 4321';
-    await enroll.getByLabel('Name').fill('Nora Newcomer');
-    await enroll.getByLabel('E-mail').fill('nora@demo.g00pass.invalid');
-    await enroll.getByLabel(/^Passphrase/).fill(NEW_PASS);
-    await enroll.getByLabel('Confirm passphrase').fill(NEW_PASS);
-    await enroll.getByRole('button', { name: 'Generate key' }).click();
-    await waitStatus(q, /Key created/, 120_000);
-    const fpr = ((await enroll.locator('.mono.fpr').textContent()) ?? '').replace(/\s+/g, '');
-    expect(fpr).toMatch(/^[0-9A-F]{40}$/);
-    expect(await enroll.getByLabel('Folder', { exact: true }).inputValue()).toBe('team');
-    await enroll.getByLabel(/Key passphrase/).fill(NEW_PASS);
-    await enroll.getByRole('button', { name: 'Sign & submit request' }).click();
-    await waitStatus(q, /Request submitted/);
-    await shot(enroll, '05-newcomer-request');
+    await q.getByLabel('Your name').fill('Nora Newcomer');
+    await q.getByLabel('E-mail').fill('nora@demo.g00pass.invalid');
+    await q.getByLabel('Passphrase', { exact: true }).fill(NEW_PASS);
+    await q.getByLabel('Repeat passphrase').fill(NEW_PASS);
+    await q.getByRole('button', { name: 'Create my key' }).click();
+
+    await onScreen(q, /Ask for access/, 120_000);
+    expect(await q.getByLabel('Folder', { exact: true }).inputValue()).toBe('team');
+    await q.getByLabel('Your key passphrase').fill(NEW_PASS);
+    await q.getByRole('button', { name: 'Send request' }).click();
+    await onScreen(q, /Waiting for approval/);
+    const tail = ((await q.locator('.fpr-tail').textContent()) ?? '').replace(/\s+/g, '');
+    expect(tail).toMatch(/^[0-9A-F]{16}$/);
+    await shot(q, '07-join-waiting');
     expect(gh.repo(REQUESTS).issues).toHaveLength(1);
     expect(gh.repo(REQUESTS).issues[0]!.body).not.toContain('github_pat_');
 
-    // ---- admin: inbox, confirm fingerprint, approve ----
-    const inbox = card(p, 'Access requests');
-    await inbox.getByRole('button', { name: 'Load access requests' }).click();
-    const item = inbox.locator('article.request');
-    await count(item, 1, 30_000);
+    // ---- admin: approve ----
+    await tabTo(p, 'Access');
+    await inboxIdle(p);
+    await p.locator('.inbox').getByRole('button', { name: 'Refresh' }).click();
+    await inboxIdle(p);
+    const item = p.locator('article.request');
+    await count(item, 1);
     await count(item.locator('.badge.ok', { hasText: 'Invited' }), 1);
-    await item.getByPlaceholder('last 16 characters').fill(fpr.slice(-16));
+    await item.getByPlaceholder('last 16 characters').fill(tail);
     await item.getByText('I reviewed the recipient change above').click();
-    await shot(item, '06-admin-approve');
+    await shot(p, '08-access-approve');
     await item.getByRole('button', { name: 'Approve' }).click();
-    await waitStatus(p, /Approved in/, 60_000);
+    await waitStatus(p, /Approved in/);
     const issue = gh.repo(REQUESTS).issues[0]!;
     expect(issue.state).toBe('closed');
     expect(issue.labels).toContain('g00pass:approved');
-    const files = gh.head(STORE);
-    expect([...files.keys()].some((k) => k.startsWith('.g00pass/invites/'))).toBe(false); // invite consumed
-    expect(new TextDecoder().decode(files.get('team/.gpg-id')!)).toContain(fpr);
+    expect([...gh.head(STORE).keys()].some((k) => k.startsWith('.g00pass/invites/'))).toBe(false); // invite consumed
 
-    // ---- newcomer: reader token, decrypt ----
-    await configure(q, READER_TOKEN);
-    await waitStatus(q, /Loaded \d+ entries/);
+    // ---- newcomer: notices the approval, connects, decrypts ----
+    await q.getByRole('button', { name: 'Check now' }).click();
+    await onScreen(q, /You are approved/);
+    await shot(q, '09-join-connect');
+    await q.getByLabel('Read token for the store').fill(READER_TOKEN);
+    await q.getByRole('button', { name: 'Connect' }).click();
     await unlock(q, NEW_PASS);
     expect(await reveal(q, 'team/wiki')).toBe('correct-horse-battery');
-    await shot(q.locator('section.entry'), '07-newcomer-decrypts');
+    await shot(q, '10-newcomer-secrets');
 
     // ---- admin: remove the newcomer, rotation checklist ----
-    await p.getByRole('button', { name: 'Save & load' }).click();
-    await waitStatus(p, /Loaded/);
-    await folders.getByLabel('Folder', { exact: true }).selectOption('team');
-    await folders.getByRole('button', { name: 'Open' }).click();
-    const row = folders.locator('li', { hasText: 'Nora Newcomer' });
-    await row.getByRole('button', { name: 'Remove…' }).click();
-    const box = folders.locator('div.request');
+    await openFolder(p, 'team/');
+    await p.locator('.folder-admin li', { hasText: 'Nora Newcomer' }).getByRole('button', { name: 'Remove…' }).click();
+    const box = p.locator('.folder-admin div.request');
     await box.getByText('I reviewed this exact change and approve it.').click();
-    await shot(box, '08-admin-remove');
     await box.getByRole('button', { name: 'Remove member' }).click();
-    await waitStatus(p, /Removed/, 60_000);
-    await folders.getByText(/Rotate after removing/).first().waitFor({ state: 'visible', timeout: 30_000 });
-    await shot(folders.locator('div.checklist'), '09-rotation-checklist');
-    expect(new TextDecoder().decode(gh.head(STORE).get('team/.gpg-id')!)).not.toContain(fpr);
+    await waitStatus(p, /Removed/);
+    await p.getByText(/Rotate after removing/).first().waitFor({ state: 'visible', timeout: 30_000 });
+    await shot(p, '11-access-rotation');
+    expect(new TextDecoder().decode(gh.head(STORE).get('team/.gpg-id')!)).not.toContain(tail);
 
-    // The newcomer can no longer decrypt the (re-encrypted) entry.
-    await q.getByRole('button', { name: 'Save & load' }).click();
-    await waitStatus(q, /Loaded/);
-    await card(q, 'Entries').getByRole('button', { name: 'team/wiki', exact: true }).click();
-    await waitStatus(q, /Could not decrypt/);
+    // The newcomer reloads: no folder is readable any more.
+    await q.reload();
+    await unlock(q, NEW_PASS);
+    await q.getByText("You don't have access to any folder yet").waitFor({ timeout: 30_000 });
 
-    expect(errors.filter((e) => !/favicon|sw\.js|ServiceWorker/i.test(e))).toEqual([]);
+    expect(errors).toEqual([]);
   }, 600_000);
 });

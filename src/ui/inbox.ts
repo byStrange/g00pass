@@ -28,6 +28,8 @@ export interface InboxDeps {
   setStatus: (text: string, isError?: boolean) => void;
   /** Called after a successful approval so the app can reload the store; `note` is the result to keep showing. */
   onApproved: (note: string, isError: boolean) => void;
+  /** Number of requests the operator can act on (tab badge). */
+  onCount?: (n: number) => void;
 }
 
 const PHASES: Record<ReencryptProgress['phase'], string> = {
@@ -56,14 +58,14 @@ const errMsg = (e: unknown) => (e instanceof G00passError ? e.message : 'Unexpec
  */
 export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => Promise<void>; clear: () => void } {
   const body = h('div', { class: 'inbox-list' });
-  const summary = h('p', { class: 'hint' }, 'Access requests are read from the requests repository when you load them.');
-  const loadBtn = h('button', { type: 'button', onclick: () => void refresh() }, 'Load access requests');
-  const el = h('section', { class: 'card inbox' }, h('h2', {}, 'Access requests'), summary, h('div', { class: 'row' }, loadBtn), body);
+  const summary = h('p', { class: 'hint' }, 'Loading requests…');
+  const loadBtn = h('button', { type: 'button', class: 'ghost small', onclick: () => void refresh() }, 'Refresh');
+  const el = h('section', { class: 'panel inbox' }, h('div', { class: 'panel-head' }, h('h3', {}, 'Access requests'), loadBtn), summary, body);
   let busy = false;
 
   function reset() {
     clear(body);
-    summary.textContent = 'Access requests are read from the requests repository when you load them.';
+    summary.textContent = '';
   }
 
   async function refresh() {
@@ -79,10 +81,9 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
     try {
       const fp = await deps.deviceFingerprint();
       if (!fp) {
-        deps.setStatus('Store your device key first.', true);
+        summary.textContent = 'Set up your key first.';
         return;
       }
-      deps.setStatus('Loading access requests…');
       const [issues, snapshot] = await Promise.all([
         listIssues(deps.client, issueRepo),
         GitHubSnapshot.load(deps.client, cfg),
@@ -94,11 +95,11 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
         operatorFingerprint: fp,
       });
       clear(body);
+      deps.onCount?.(inbox.actionable.length);
       summary.textContent =
-        `${inbox.actionable.length} request(s) you can act on` +
-        (inbox.blocked.length ? `; ${inbox.blocked.length} blocked` : '') +
-        (inbox.hidden ? `; ${inbox.hidden} for folders where you are not a verified admin recipient (see reasons)` : '') +
-        '.';
+        (inbox.actionable.length ? `${inbox.actionable.length} waiting for you` : 'No requests waiting for you.') +
+        (inbox.blocked.length ? ` ${inbox.blocked.length} blocked.` : '') +
+        (inbox.hidden ? ` ${inbox.hidden} for folders you don't manage.` : '');
       for (const item of inbox.actionable) body.append(renderItem(item, issueRepo));
       if (inbox.blocked.length) {
         const list = h('ul', { class: 'invalid' });
@@ -115,9 +116,11 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
         for (const i of inbox.invalid.slice(0, 20)) list.append(h('li', {}, `#${i.issue.number}: ${i.message}`));
         body.append(h('details', {}, h('summary', {}, `${inbox.invalid.length} invalid request(s) (not approvable)`), list));
       }
-      deps.setStatus('Access requests loaded.');
     } catch (e) {
-      deps.setStatus(errMsg(e), true);
+      const st = (e as { status?: number }).status;
+      summary.textContent = st === 403 || st === 404 || st === 401
+        ? `Your token cannot read issues in ${issueRepo.owner}/${issueRepo.repo}. To manage requests it needs Issues: Read and write there.`
+        : `Could not load requests: ${errMsg(e)}`;
     } finally {
       busy = false;
       loadBtn.disabled = false;

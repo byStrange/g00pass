@@ -57,7 +57,7 @@ describe('trust choke-point (static guard, backs up the ESLint rule)', () => {
   });
 
   it('L2: every UI path that stores a device key validates it with inspectImportedKey first', () => {
-    for (const f of ['src/ui/app.ts', 'src/ui/enroll.ts']) {
+    for (const f of ['src/ui/keyforms.ts']) {
       const s = code(join(ROOT, f));
       const calls = [...s.matchAll(/saveDeviceKey\(\s*(\w+(?:\.\w+)*)\s*\)/g)];
       for (const c of calls) {
