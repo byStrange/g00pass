@@ -87,6 +87,22 @@ const TS_RE = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
 // C0/C1 controls, bidi overrides/isolates, zero-width and line/paragraph separators.
 // eslint-disable-next-line no-control-regex
 const UNSAFE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CHARS_G = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
+
+/**
+ * Display-safe version of untrusted text (key user ids, e-mails): every
+ * control, bidi override/isolate, zero-width and line/paragraph separator
+ * character (the UNSAFE_CHARS set, plus tab/newline) becomes U+FFFD, and the
+ * result is cut to `max` code points. Render the result as TEXT only.
+ */
+export function sanitizeDisplayText(s: string, max = 200): string {
+  const clean = s.replace(UNSAFE_CHARS_G, '\ufffd');
+  const cps = [...clean];
+  return cps.length > max ? cps.slice(0, max).join('') + '…' : clean;
+}
+
+const EMAIL_RE = /<([^<>\s@]{1,64}@[^<>\s@]{1,190})>/;
 const MIN = 60_000;
 const DAY = 24 * 60 * MIN;
 
@@ -219,7 +235,11 @@ export async function parseAccessRequest(body: unknown, ctx: ParseContext): Prom
   }
   if (Math.abs(sigTime - created) > 10 * MIN) return fail('bad-time', 'Signature time does not match createdAt');
 
-  const userIds = key.getUserIDs();
+  // Key user ids are attacker-controlled: sanitized for display (L1).
+  const rawIds = key.getUserIDs().slice(0, 10);
+  const userIds = rawIds.map((u) => sanitizeDisplayText(u, 200));
+  // E-mail only if it is entirely safe text (never a sanitized/altered one).
+  const email = rawIds.map((u) => EMAIL_RE.exec(u)?.[1]).find((e) => e !== undefined && !UNSAFE_CHARS.test(e) && !/[\t\n]/.test(e)) ?? null;
   const request: ParsedAccessRequest = Object.freeze({
     repo,
     storeRoot: root,
@@ -233,7 +253,7 @@ export async function parseAccessRequest(body: unknown, ctx: ParseContext): Prom
     createdAt,
     nonce,
     userIds: Object.freeze(userIds),
-    email: userIds.map((u) => /<([^<>\s]{1,254})>/.exec(u)?.[1]).find((e) => e !== undefined) ?? null,
+    email,
     signatureValid: true,
   });
   parsed.add(request);
