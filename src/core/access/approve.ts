@@ -16,8 +16,8 @@ import type { ReencryptProgress, ReencryptResult } from '../reencrypt';
 import type { StoreSnapshot, StoreWriter } from '../store';
 import { joinPath } from '../paths';
 import { GPG_ID } from '../paths';
-import { buildAdminsFileUpdate } from './admins';
-import { isFolderAdmin, isFolderRecipient } from './folders';
+import { checkFolderAdmin, signAdminsFile, verifyAdminsFile } from '../admins';
+import { isFolderRecipient } from './folders';
 import { changeFolderRecipients } from './recipients';
 
 export type ApprovalErrorCode =
@@ -70,6 +70,21 @@ export interface ApprovalResult {
   result: ReencryptResult;
 }
 
+/** Next signed admins file for `folder` with `add` merged into the currently VERIFIED admins of that exact folder. */
+async function folderAdminsUpdate(
+  snapshot: StoreSnapshot,
+  folder: string,
+  add: string,
+  signingKey: PrivateKey,
+  date: Date | undefined,
+  signal: AbortSignal | undefined,
+) {
+  const file = await verifyAdminsFile(snapshot, folder, signal);
+  if (file.status === 'invalid') throw new ApprovalError('not-admin', `Existing admins file is not valid: ${file.reason}`);
+  const existing = file.status === 'valid' ? file.admins : [];
+  return (await signAdminsFile({ snapshot, folder, admins: [...existing, add], signingKey, date, signal })).changes;
+}
+
 /** Re-check authority against `snapshot`; throws ApprovalError. */
 export async function assertCanApprove(snapshot: StoreSnapshot, req: ParsedAccessRequest, operatorFpr: string): Promise<void> {
   if (!snapshot.hasFile(joinPath(req.folder, GPG_ID))) throw new ApprovalError('no-such-folder', `"${req.folder}" has no .gpg-id of its own`);
@@ -79,9 +94,8 @@ export async function assertCanApprove(snapshot: StoreSnapshot, req: ParsedAcces
   if (!(await isFolderRecipient(snapshot, req.folder, operatorFpr))) {
     throw new ApprovalError('not-recipient', 'You are not a recipient of this folder, so you cannot re-encrypt it');
   }
-  if (!(await isFolderAdmin(snapshot, req.folder, operatorFpr))) {
-    throw new ApprovalError('not-admin', 'You are not an admin of this folder');
-  }
+  const admin = await checkFolderAdmin(snapshot, req.folder, operatorFpr);
+  if (!admin.admin) throw new ApprovalError('not-admin', `You are not a verified admin of this folder: ${admin.reason}`);
 }
 
 /**
@@ -109,7 +123,7 @@ export async function approveAccessRequest(req: ParsedAccessRequest, opts: Appro
       await assertCanApprove(snapshot, req, operatorFingerprint);
       const extraChanges =
         req.role === 'folder-admin'
-          ? await buildAdminsFileUpdate(snapshot, req.folder, [req.fingerprint], opts.operatorKey, opts.now)
+          ? [...(await folderAdminsUpdate(snapshot, req.folder, req.fingerprint, opts.operatorKey, opts.now, opts.signal))]
           : [];
       return changeFolderRecipients(
         req.folder,

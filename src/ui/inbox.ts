@@ -92,9 +92,14 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
       clear(body);
       summary.textContent =
         `${inbox.actionable.length} request(s) you can act on` +
-        (inbox.hidden ? `; ${inbox.hidden} for folders where you are not an admin recipient (hidden)` : '') +
+        (inbox.hidden ? `; ${inbox.hidden} for folders where you are not a verified admin recipient (see reasons)` : '') +
         '.';
       for (const item of inbox.actionable) body.append(renderItem(item, issueRepo));
+      if (inbox.hiddenReasons.length) {
+        const list = h('ul', { class: 'invalid' });
+        for (const i of inbox.hiddenReasons.slice(0, 20)) list.append(h('li', {}, `#${i.issue.number} (${i.folder}): ${i.reason}`));
+        body.append(h('details', {}, h('summary', {}, `${inbox.hiddenReasons.length} request(s) you cannot approve`), list));
+      }
       if (inbox.invalid.length) {
         const list = h('ul', { class: 'invalid' });
         for (const i of inbox.invalid.slice(0, 20)) list.append(h('li', {}, `#${i.issue.number}: ${i.message}`));

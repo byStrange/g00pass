@@ -1,11 +1,11 @@
 import type { PrivateKey } from 'openpgp';
-import { signDetached } from '../crypto/sign';
 import { G00passError } from '../errors';
 import { type GpgIdLine, normalizeKeyId } from '../gpgid';
 import { fingerprintOf, parsePublicKey } from '../keys';
 import { PUBLIC_KEYS_DIR, joinPath, normalizePath } from '../paths';
 import { type ReencryptOptions, type ReencryptProgress, type ReencryptResult, reencryptFolder } from '../reencrypt';
 import { type StoreSnapshot, type StoreWriter, listGovernedEntries } from '../store';
+import { signGpgId } from '../signatures';
 import { escrowRecipientIds } from '../trust';
 import { idMatchesFingerprint, readRecipientLines } from './folders';
 
@@ -41,7 +41,7 @@ const FPR_RE = /^[0-9A-F]{40}$/;
  * "approve request" (add) and, in Phase 2, "remove member" (remove).
  *
  * One commit contains: all governed entries re-encrypted, the new `.gpg-id`,
- * its detached `.gpg-id.sig` (signed by `operatorKey`), new `.public-keys/*`,
+ * its detached `.gpg-id.sig` (signed by `operatorKey`, bound to the folder via the `folder@g00pass` notation), new `.public-keys/*`,
  * plus `extraChanges`. Callers wrap this in `withConflictRetry` with a fresh
  * snapshot per attempt. Encryption goes through reencryptFolder, i.e. the
  * trust choke-point; escrow recipients are merged back in by the core.
@@ -96,7 +96,7 @@ export async function changeFolderRecipients(
     writer: opts.writer,
     decryptionKeys: [operatorKey],
     pendingKeys: pending,
-    gpgIdSignature: (text) => signDetached(text, operatorKey),
+    gpgIdSignature: (text) => signGpgId(text, f, operatorKey),
     replaceEntries: opts.replaceEntries,
     extraChanges: opts.extraChanges,
     message: opts.message,

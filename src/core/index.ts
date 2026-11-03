@@ -33,11 +33,9 @@ export {
   type RequestRole,
 } from './requests/build';
 export * from './requests/submit';
-export { signDetached } from './crypto/sign';
 export * from './github/issues';
 export * from './requests/parse';
-export { ADMINS_FILE, ADMINS_SIG_FILE, isFolderAdmin, isFolderRecipient, globalAdmins, folderAdminsFromFile } from './access/folders';
-export { buildAdminsFileUpdate } from './access/admins';
+export { idMatchesFingerprint, isFolderRecipient, readRecipientLines } from './access/folders';
 export * from './access/recipients';
 export * from './access/approve';
 export * from './access/inbox';
