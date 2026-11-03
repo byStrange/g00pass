@@ -19,7 +19,7 @@ codes. They must never contain plaintext, passphrases, keys or tokens.
 | `StorePathError` | bad path | |
 | `NoRecipientsError` | no `.gpg-id` up to the root | `path` |
 | `RecipientKeyError` | id doesn't resolve to exactly one usable public key | `recipientId` |
-| `TrustError` | choke-point refused | `folder`, `reason`, `code: 'untrusted' \| 'signature-missing' \| 'signature-invalid' \| 'unknown-signer' \| 'escrow-missing' \| 'not-verified' \| 'anchor-mismatch' \| 'replayed' \| 'weak-recipient'` |
+| `TrustError` | choke-point refused | `folder`, `reason`, `code: 'untrusted' \| 'signature-missing' \| 'signature-invalid' \| 'unknown-signer' \| 'escrow-missing' \| 'not-verified' \| 'anchor-mismatch' \| 'replayed' \| 'weak-recipient' \| 'boundary-vanished' \| 'boundary-undeclared'` |
 | `DecryptError` | entry can't be decrypted | `path` |
 | `GitHubApiError` | non-2xx from GitHub | `status`, `retryAfterSeconds?` |
 | `ConflictError` | branch moved since the snapshot | `expectedSha`, `actualSha`, `retryable = true` |
@@ -80,6 +80,7 @@ interface StoreWriter {
 listEntries(snapshot, folder = ''): string[]          // all *.gpg below, recursive
 listGovernedEntries(snapshot, folder): string[]       // stops at nested .gpg-id folders
 nestedGpgIdFolders(snapshot, folder): string[]
+directNestedGpgIdFolders(snapshot, folder): string[]  // nested, not inside another nested one
 class MemoryStore / MemoryWriter                      // tests; same CAS semantics
 ```
 
@@ -110,11 +111,16 @@ no keyserver or keyring lookups.
 
 ```ts
 interface RecipientVerificationRequest {
-  folder; gpgIdPath; gpgIdContent: Uint8Array; gpgIdSignature: Uint8Array | null;
+  folder; gpgIdPath; target /* folder the write lands in */; childBoundaries: string[] | null /* proposed */;
+  gpgIdContent: Uint8Array; gpgIdSignature: Uint8Array | null;
   proposed: boolean; recipients: readonly ResolvedRecipient[]; snapshot: StoreSnapshot;
 }
 type TrustDecision = { ok: true; warnings?: string[] } | { ok: false; code: TrustErrorCode; reason: string };
-interface TrustHook { name: string; verify(req): Promise<TrustDecision> }
+interface TrustHook {
+  name: string; verify(req): Promise<TrustDecision>;
+  childBoundaries?(snapshot, folder, signal?): Promise<{ ok: true; children } | { ok: false; code; reason }>; // asked before signing
+}
+type GpgIdSigner = (gpgIdText, { folder, children }) => Promise<Uint8Array>
 
 unconfiguredTrustHook          // default until main.ts installs a policy: refuses everything
 passThroughTrustHook           // tests only (test/setup.ts): ok + warning 'recipient-signatures-not-verified'
@@ -123,11 +129,11 @@ lockTrustHook(): void          // main.ts locks after install; later setTrustHoo
 getTrustHook(): TrustHook
 
 interface VerifiedRecipientSet {   // frozen; only mintable inside trust.ts
-  folder; gpgIdPath; fingerprints; keys; snapshotSha; proposed; warnings; hook
+  folder; gpgIdPath; fingerprints; keys; snapshotSha; proposed; childBoundaries; warnings; hook
 }
 isVerifiedRecipientSet(x): boolean
 verifyRecipients(snapshot, { entry } | { folder }, { signal? }): Promise<VerifiedRecipientSet>
-verifyProposedRecipients(snapshot, folder, lines, { pending?, signature?, signal? })
+verifyProposedRecipients(snapshot, folder, lines, { pending?, signature?: Uint8Array | GpgIdSigner, signal? })
   : Promise<{ verified; gpgIdText; gpgIdPath; gpgIdSignature }>
 escrowRecipientIds(snapshot): Promise<string[]>
 ```
@@ -142,9 +148,10 @@ The core enforces these rules regardless of which hook is installed:
 - **Escrow (existing sets).** If the folder lacks the escrow recipient, the core
   adds `warnings: ['escrow-missing']`; the production hook then refuses
   (`escrow-missing`).
-- **Signature binding.** `signature` may be a callback `(gpgIdText) => Promise<Uint8Array>`.
-  It receives the exact final bytes and runs before the hook, so the hook can
-  verify it.
+- **Signature binding.** `signature` may be a callback `(gpgIdText, { folder, children }) => Promise<Uint8Array>`.
+  It receives the exact final bytes and the child boundaries to declare
+  (from `hook.childBoundaries`, else the nested `.gpg-id` folders present),
+  and runs before the hook, so the hook can verify it.
 
 **Signature checks (Phase 1)** are implemented by `signatureTrustHook`
 (`src/core/trust-policy.ts`, [gpg-id-signatures.md](gpg-id-signatures.md)),
@@ -169,7 +176,8 @@ evaluateRootTrust(snapshot): Promise<RootTrust>   // { ok, anchors, escrow, sign
 normalizeFingerprints(fprs): string[]
 
 // src/core/signatures.ts
-signGpgId(text | bytes, folder, privateKey, { date? }): Promise<Uint8Array>   // folder-bound .gpg-id.sig
+signGpgId(text | bytes, folder, privateKey, { date?, children? }): Promise<Uint8Array>   // folder-bound .gpg-id.sig + child@g00pass
+childBoundariesFromNotations(values, folder): string[] | errorMessage
 signDetached(bytes, privateKey, { notations?, date? }); parseDetachedSignature(bytes); verifyDetached(bytes, parsed, keys, now)
 loadKeyByFingerprint(snapshot, FPR): Promise<PublicKey | null>                // primary FPR must match
 
@@ -180,8 +188,12 @@ checkFolderAdmin(snapshot, folder, fpr): Promise<{ admin; via: 'anchor' | 'admin
 isVerifiedFolderAdmin(snapshot, folder, fpr): Promise<boolean>
 signAdminsFile({ snapshot, folder, admins, signingKey, date? }): Promise<{ document, path, sigPath, content, signature, changes }>
 
+// src/core/boundaries.ts (gpg-id-signatures.md §Child boundaries)
+declaredChildren(snapshot, folder); boundaryChain(snapshot, folder); expectedChildBoundaries(snapshot, folder)
+vanishedBoundaryFor(...); knownBoundaries(storeId); recordBoundaries(storeId, folders); allowedSigners(snapshot, folder, root)
+
 // src/core/trust-policy.ts
-signatureTrustHook: TrustHook                 // name 'gpg-id signatures v1'
+signatureTrustHook: TrustHook                 // name 'gpg-id signatures v1'; implements childBoundaries
 folderTrustStatus(snapshot, folder); allFolderTrustStatus(snapshot)   // UI status = real write-path decision
 
 // src/core/canonical.ts
@@ -202,9 +214,13 @@ wipe(buf)                                               // best-effort zeroing
 ```
 
 `encrypt.ts` is the **only** file allowed to call `openpgp.encrypt`. ESLint
-`no-restricted-imports`/`no-restricted-properties` and the static scan in
-`test/guards.test.ts` enforce this, and every other file must use named
-imports from `openpgp`. Output is a binary OpenPGP message, which is what
+`no-restricted-imports`/`no-restricted-properties`/`no-restricted-syntax`
+(any `.encrypt(` / `.encryptSessionKey(` call, e.g. `Message#encrypt`) and the
+static scan in `test/guards.test.ts` enforce this, and every other file must
+use named imports from `openpgp`. At runtime, `installEncryptGuard()`
+(called by `src/main.ts`) makes openpgp's `Message#encrypt` and
+`Message.encryptSessionKey` refuse any key array that encryptToVerified did
+not pass in, and any password. Output is a binary OpenPGP message, which is what
 pass/gopass write. Armor is optional, and gpg/pass/gopass read both.
 
 Key generation for enrollment MUST use v4 keys (`type: 'ecc', curve:
@@ -229,15 +245,31 @@ writeEntry({ snapshot, writer, entry, plaintext, companions?, message?, armor?, 
 each must be governed by the same `.gpg-id`. The rotation metadata is an
 example (rotation.md).
 
+## Recipient changes — `src/core/access/recipients.ts`, `approve.ts`
+
+```ts
+planFolderRecipientChange(snapshot, folder, { add?, remove? }, { operatorFingerprint })
+  : Promise<RecipientChangePlan>   // { folder, before, after, added, removed, droppedEscrow, childBoundaries, digest, warnings }
+changeFolderRecipients(folder, change, { snapshot, writer, operatorKey, approvedPlanDigest, ... }): Promise<ReencryptResult>
+previewApproval(snapshot, request, operatorFpr): Promise<RecipientChangePlan>
+approveAccessRequest(request, { ..., confirmation: { fingerprintSuffix, acknowledgeUninvited?, approvedPlan } })
+RecipientChangeError.code: 'invalid-change' | 'not-recipient' | 'folder-not-verified' | 'plan-changed'
+```
+
+The plan requires the folder's CURRENT `.gpg-id` to verify (tolerating only
+`escrow-missing`), drops retired escrow lines, and is bound to a digest over
+`{folder, before, after, childBoundaries}`; `changeFolderRecipients`
+recomputes it on its snapshot and refuses a different digest.
+
 ## Folder re-encrypt — `src/core/reencrypt.ts`
 
 ```ts
 reencryptFolder(path, newRecipients: (string | {id, flags?})[], {
   snapshot, writer, decryptionKeys,
   pendingKeys?: Map<FPR, armoredPublicKey>,     // also written to .public-keys/<FPR>
-  gpgIdSignature?: Uint8Array | ((gpgIdText) => Promise<Uint8Array>),
+  gpgIdSignature?: Uint8Array | GpgIdSigner,    // (text, { folder, children }) => signGpgId(text, folder, key, { children })
   replaceEntries?: { path, plaintext }[],       // new content for governed entries (e.g. rotation metadata)
-  extraChanges?: FileChange[],                  // e.g. admins file; may not touch *.gpg / .gpg-id
+  extraChanges?: FileChange[],                  // ONLY <folder>/.g00pass-admins.json(.sig)
   message?, chunkSize? = 20, armor?, onProgress?, signal?,
 }): Promise<{ commitSha; treeSha; folder; entries; fingerprints; gpgIdText; warnings }>
 type ReencryptProgress = { phase: 'verifying' | 'reencrypting' | 'committing' | 'done'; done; total }
@@ -252,6 +284,13 @@ Semantics:
   kept.
 - **All or nothing.** Every entry is decrypted in memory. If any entry fails,
   the call throws `ReencryptError(failedPaths)` and nothing is committed.
+- **No absorption.** The declared child boundaries of the verified proposal
+  must be exactly the nested `.gpg-id`s that are skipped, and every governed
+  entry must already be encrypted (by PKESK key id) to every current
+  non-escrow recipient of the governing `.gpg-id`; otherwise
+  `ReencryptError` (the entry may belong to a deleted boundary). Note: a
+  `.gpg-id` that gained a member without re-encrypting (hand-edited and
+  signed with gpg) is refused too; re-encrypt with `pass init -p` / gopass.
 - **Plaintext** buffers are wiped after re-encryption.
 - **One commit** contains the entries, the new `.gpg-id`, and the new
   `.gpg-id.sig`. If no new signature is given, any stale `.gpg-id.sig` is

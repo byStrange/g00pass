@@ -181,30 +181,48 @@ wnUEARYKACcFgm…
      approving needs an extra confirmation.
 8. The operator must be a folder admin of `folder` (folder-admins.md) or a
    trust anchor, **and** a recipient of it. Otherwise Approve is hidden.
-9. The UI shows the fingerprint in groups of 4 and requires the approver to
-   tick "I confirmed this fingerprint with <name> through another channel".
-   This step is the only identity check. Anyone holding an invite link, or
-   anyone who can edit issues, can submit a validly self-signed request.
+   The folder's **current** `.gpg-id` must pass the trust choke-point
+   (`verifyRecipients`). Otherwise the request is listed as **blocked** with
+   the reason and is not approvable: re-signing an unverified list would
+   launder lines added without authority. The only tolerated failure is
+   `escrow-missing`, which the approval repairs.
+9. The UI shows the fingerprint in groups of 4. The approver asks the
+   requester for their fingerprint through another channel and **types its
+   last 8 characters** (`confirmation.fingerprintSuffix`); the core checks
+   them against the request. This step is the only identity check. Anyone
+   holding an invite link, or anyone who can edit issues, can submit a
+   validly self-signed request.
+10. The UI shows the exact **before → after** recipient list
+    (`previewApproval` / `planFolderRecipientChange`: full fingerprints,
+    user ids from the keys, escrow, sub-folders that keep their own
+    recipients). The approver confirms it, and the plan's `digest` is passed
+    as `confirmation.approvedPlan`. The core recomputes the plan on the
+    snapshot it commits on and refuses with `plan-changed` if it differs.
 
 ### Approving
 
 All of the following happens in one `withConflictRetry` attempt (fresh snapshot
-each time):
+each time). `approveAccessRequest` does it via `changeFolderRecipients`:
 
 ```ts
-reencryptFolder(folder, [...currentNonEscrowLines, fingerprint], {
+const plan = await planFolderRecipientChange(snapshot, folder, { add: [{ fingerprint, publicKey }] }, { operatorFingerprint });
+// plan.digest must equal the approved digest; plan.lines = VERIFIED current
+// non-escrow lines (retired escrow dropped) + fingerprint; escrow is merged by the core.
+reencryptFolder(folder, plan.lines, {
   snapshot, writer, decryptionKeys: [operatorKey],
   pendingKeys: new Map([[fingerprint, publicKey]]),        // -> .public-keys/<FPR>
-  gpgIdSignature: (text) => signGpgId(text, folder, operatorKey), // folder-bound notation (gpg-id-signatures.md)
-  replaceEntries: [rotationFileWithMemberAdded],         // rotation.md
-  extraChanges: [
-    ...(role === 'folder-admin' ? adminsFileUpdate : []),  // folder-admins.md, signed
-    ...(inviteId ? [{ path: `.g00pass/invites/${inviteId}.json`, delete: true },
-                    { path: `.g00pass/invites/${inviteId}.json.sig`, delete: true }] : []),
-  ],
+  gpgIdSignature: (text, { children }) => signGpgId(text, folder, operatorKey, { children }), // folder-bound + child boundaries (gpg-id-signatures.md)
+  extraChanges: role === 'folder-admin' ? adminsFileUpdate : [],  // folder-admins.md, signed; the ONLY allowed extraChanges
   message: `g00pass: grant ${fingerprint.slice(-16)} ${role} on ${folder} (${requestsRepo}#${n})`,
 });
 ```
+
+**Phase 2, not implemented:** updating the rotation file in the same commit
+(`replaceEntries: [rotationFileWithMemberAdded]`, rotation.md) and deleting
+the invite record (`.g00pass/invites/<id>.json` + `.sig`). Invite records
+are not verified yet, so every approval needs the "no verified invite"
+acknowledgement, and `reencryptFolder` refuses `extraChanges` other than the
+folder's admins file.
 
 After the commit succeeds, update the issue. These steps are best-effort, and
 the commit remains the source of truth:
@@ -220,10 +238,13 @@ The UI then reminds the admin to **revoke the invite token** on GitHub.
 1. Comment with the reason.
 2. Add the label `g00pass:rejected`.
 3. Close with `state_reason: "not_planned"`.
-4. Optionally delete the invite record. No commit to the store is needed
-   otherwise.
+4. (Phase 2, not implemented) Optionally delete the invite record. No commit
+   to the store is needed otherwise.
 
 ## Invites
+
+**Status: Phase 2, not implemented** (link handling, invite registry,
+over-scope token probe). The format below is normative for that work.
 
 An invite is a link the admin sends to the new user through a channel they
 trust (chat, e-mail, in person). It carries a **requester token** and the
@@ -353,7 +374,9 @@ Notes:
 ## Security notes for implementers
 
 - Render issue bodies, names, and notes **as text only**, never as HTML or
-  markdown.
+  markdown. Key user ids and the e-mail are attacker-controlled too: the
+  parser replaces control, bidi and zero-width characters
+  (`sanitizeDisplayText`) and drops an e-mail that contains any.
 - An attacker with issues write access can edit another person's request and
   swap in their own key. The swapped key produces a different fingerprint, and
   the out-of-band fingerprint confirmation catches that.

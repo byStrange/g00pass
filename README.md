@@ -18,9 +18,13 @@ npm run build      # typecheck + vite build + dist CSP/inline-script check
 ```
 
 The build version and commit appear in the app header. Set `G00PASS_COMMIT`
-to override the commit (e.g. for reproducible CI builds). Deploy `dist/` to
-any static host; `dist/_headers` carries the CSP as an HTTP header for
-hosts that support it (Netlify, Cloudflare Pages).
+to override the commit (e.g. for reproducible CI builds). Deploy `dist/` at
+the **root of a dedicated origin** (own domain or subdomain): the device key
+and the pinned trust anchors live in `localStorage`, which every page on the
+same origin can read and change. Prefer a host that serves `dist/_headers`
+(CSP incl. `frame-ancestors`), e.g. Cloudflare Pages or Netlify. On
+`*.github.io` or below the origin root the app shows a blocking warning that
+must be explicitly accepted.
 
 **Tokens:** use a fine-grained PAT restricted to the store repo with
 *Contents: Read-only*. It stays in memory, or in sessionStorage if you opt in.
@@ -34,5 +38,12 @@ the settings to a *separate private repo*: a token with Issues access can read
 every issue in its repo, so do not share the store repo with requesters. If it
 is unset the app falls back to the store repo and shows a warning. Requesters
 need only a fine-grained PAT with *Issues: Read and write* on the requests
-repo; the request token is kept in memory only. Always confirm the requester's
-fingerprint out of band before approving.
+repo; the request token is kept in memory only. Before approving, ask the
+requester for their fingerprint out of band and type its last 8 characters,
+and review the exact before → after recipient list. Folders whose current
+recipient list does not verify cannot be approved.
+
+**Existing stores (breaking change):** `.gpg-id.sig` must now declare nested
+boundaries with `child@g00pass` notations; re-sign the root and every parent
+of a nested `.gpg-id` once, see
+[gpg-id-signatures.md §Migrating](docs/specs/gpg-id-signatures.md#migrating-an-existing-store-breaking-change).

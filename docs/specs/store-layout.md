@@ -12,7 +12,7 @@ pass/gopass ignore, or a comment inside `.gpg-id`, which they also ignore.
 | `<F>/<name>.gpg` | OpenPGP message, binary (armored accepted) | anyone with write | Entry. Encrypted to the nearest `.gpg-id`. |
 | `.gpg-id` (root) | text, one id per line | global admin | Recipients of root entries **and** the list of global admins (see below). Escrow line flagged `g00pass:escrow`. |
 | `<F>/.gpg-id` | text | folder admin / global admin | Recipients of folder F (nearest-wins). MUST contain the escrow fingerprint. |
-| `<F>/.gpg-id.sig` | detached OpenPGP signature over `.gpg-id` bytes | signer of that `.gpg-id` | [gpg-id-signatures.md](gpg-id-signatures.md). pass-compatible. |
+| `<F>/.gpg-id.sig` | detached OpenPGP signature over `.gpg-id` bytes | signer of that `.gpg-id` | [gpg-id-signatures.md](gpg-id-signatures.md). pass-compatible. Hashed notations `folder@g00pass=/<F>` and one `child@g00pass=/<child>` per direct nested boundary: the set of trust boundaries is signed state. |
 | `.public-keys/<FPR>` | armored OpenPGP public key, exactly one key | approver | gopass convention: file name = id as written in `.gpg-id`. g00pass always writes the upper-case 40-hex (v4) fingerprint as both. |
 | `.gpg-keys/<id>` | same | (legacy gopass) | Read-only fallback. |
 | `<F>/.g00pass-admins.json` | canonical JSON | global admin / folder admin | [folder-admins.md](folder-admins.md) |
@@ -66,9 +66,15 @@ AAAABBBBCCCCDDDDEEEEFFFF0000111122223333
   (owner/repo lower-cased; `storeIdOf(repo)`). The anchors are not secret, but
   they MUST NOT be writable from the store. Anything unparseable is treated as
   "not pinned" (fail closed).
-  - Deploy the app on a **dedicated origin**: every page on the same origin
-    can write `localStorage`. For example, `user.github.io/*` is shared by all
-    of that user's pages.
+  - Deploy the app at the **root of a dedicated origin**: every page on the
+    same origin can read and write `localStorage` (device key, anchors). For
+    example, `user.github.io/*` is shared by all of that user's pages. The app
+    shows a **blocking warning** on `*.github.io` or when not served at the
+    origin root, until the user explicitly accepts the risk; the
+    acknowledgement is stored per origin + path
+    (`g00pass.shared-origin-ack.v1`, `src/ui/origin.ts`). Prefer a host that
+    serves `dist/_headers` (CSP incl. `frame-ancestors 'none'`): Cloudflare
+    Pages and Netlify do; GitHub Pages does not.
 - Anchors are set in one of three ways. Each requires showing the **full**
   fingerprints and an explicit user confirmation:
   1. From an invite link (`anchors` field, access-requests.md):
@@ -76,11 +82,15 @@ AAAABBBBCCCCDDDDEEEEFFFF0000111122223333
   2. On first connect: the client shows the root `.gpg-id` fingerprints and
      asks the user to confirm them out of band
      (`pinAnchors(repo, fprs, 'first-use')`).
-  3. Manually, from settings (`'manual'`). Settings also show the pinned set
-     and can reset it (`resetAnchors`).
+  3. Manually, from settings (`'manual'`, "Pin global admins manually":
+     paste full fingerprints, confirm the source, confirm the list). Settings
+     also show the pinned set and can reset it (`resetAnchors`).
+     Pinning from an invite link (1.) is Phase 2 (invites are not
+     implemented yet).
 
   Pinning a different set, or resetting, clears the device's derived state
-  for the store: the replay high-water marks and the admins cache.
+  for the store: the replay high-water marks, the admins cache and the
+  known-boundary set.
 - **Rollover.** Anchors are updated automatically **only** when the root
   `.gpg-id` carries a valid, folder-bound `.gpg-id.sig` from a currently
   pinned anchor and is not a replay. The new anchor set is then the new root's
@@ -92,6 +102,12 @@ AAAABBBBCCCCDDDDEEEEFFFF0000111122223333
 - Per-folder replay high-water marks are kept in
   `localStorage['g00pass.gpgid-seen.v1']` as
   `{"<storeId>|<folder>": {"created": ms, "digest": "sha256:…"}}`.
+- Trust boundaries this device has verified are kept in
+  `localStorage['g00pass.boundaries-seen.v1']` as
+  `{"<storeId>|<folder>": {"since": ms}}`. A known boundary whose `.gpg-id`
+  disappears blocks writes into it and re-encrypting its parent
+  (gpg-id-signatures.md §Child boundaries). It only grows; reset the anchors
+  to clear it.
 
 ## Shared formats
 

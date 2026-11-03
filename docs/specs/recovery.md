@@ -51,9 +51,15 @@ losing the folder. There are two independent mechanisms.
 
 1. A global admin changes the escrow line in the root `.gpg-id` and re-signs
    it.
-2. Each folder then gets re-encrypted. The feature code MUST drop the previous
-   escrow lines: any `.gpg-id` line flagged `g00pass:escrow` whose FPR is no
-   longer flagged in the root. The core merges in only the *current* escrow.
+2. Each folder then gets re-encrypted. Approvals and removals
+   (`planFolderRecipientChange` / `changeFolderRecipients`) drop the previous
+   escrow lines automatically: any `.gpg-id` line flagged `g00pass:escrow`
+   whose FPR is no longer flagged in the root (shown as `droppedEscrow` in
+   the plan; test "M1" in `test/security-probes.test.ts`). The core merges in
+   only the *current* escrow. Until a folder is re-encrypted its committed set
+   is `escrow-missing` (not writable); approving there is still allowed,
+   because `escrow-missing` is checked last and so implies everything else
+   verified.
 3. Removal of escrow is a deliberate root `.gpg-id` change by a global admin.
    There is no per-folder opt-out.
 

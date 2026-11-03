@@ -43,14 +43,77 @@ recipient list before it encrypts.
 
   Only hashed notations count. openpgp.js ignores notations in the unhashed
   area, so they cannot be injected without breaking the signature (tested).
+- **Child boundaries (g00pass addition, see below).** The signature also
+  carries one hashed, non-critical notation `child@g00pass=/<child>` per
+  DIRECT nested folder that has its own `.gpg-id`. gpg and pass ignore it.
 - **gopass** neither creates nor checks `.gpg-id.sig`. After
   `gopass recipients add/remove`, the old `.sig` no longer matches, and
   g00pass refuses to encrypt in that folder until an admin re-signs it.
 - `reencryptFolder` writes a fresh signature in the same commit. Without
   one, the proposal is refused (`signature-missing`).
 
-Producer: `signGpgId(text, folder, privateKey, { date? })` in
+Producer: `signGpgId(text, folder, privateKey, { date?, children? })` in
 `src/core/signatures.ts`.
+
+## Child boundaries
+
+**Threat.** pass and gopass pick the governing `.gpg-id` by file presence
+(nearest wins). Anyone with repo write who deletes `infra/prod/.gpg-id` (and
+its `.sig`) silently moves `infra/prod/**` under `infra`: new writes are
+encrypted to the `infra` members, and the next re-encrypt of `infra`
+re-encrypts the existing `infra/prod` entries to them as well.
+
+**Rule: the boundary set is signed state.** Every `.gpg-id.sig` declares the
+folder's direct child boundaries:
+
+```
+child@g00pass=/infra/prod        one notation per direct child; repeatable
+```
+
+Values are normalized absolute folders strictly below the signed folder; no
+value may lie inside another (only direct children); duplicates and anything
+else make the signature `signature-invalid`. A folder with no nested
+boundaries carries no `child@g00pass` notation.
+
+The policy (`src/core/boundaries.ts`) enforces, on top of the per-folder checks:
+
+1. **Declared chain.** A folder F ≠ root with its own `.gpg-id` is a trusted
+   boundary only if the verified (authorized, folder-bound, not replayed)
+   signature of its nearest parent boundary P declares F, and P is itself
+   declared by its parent, up to the root. Otherwise writes in F are refused
+   (`boundary-undeclared`), or `boundary-vanished` when P declares a boundary
+   between P and F that no longer exists. Verified parents raise their replay
+   high-water marks.
+2. **Vanished boundary.** A write whose target folder lies inside a child
+   that the governing folder's signature declares, or inside any boundary this
+   device has verified before (`g00pass.boundaries-seen.v1`), but whose
+   `.gpg-id` is gone, is refused (`boundary-vanished`). Writes elsewhere in
+   the governing folder still work; the status shows the warning
+   `boundary-vanished:<child>`.
+3. **Re-signing F (approve / remove / re-encrypt).** The new signature must
+   declare exactly the expected children (`TrustHook.childBoundaries`, which
+   the core passes to the signer callback `(text, { folder, children })`):
+   - every child declared by F's current verified signature, and every
+     device-known boundary below F, must still exist (else refused:
+     re-encrypting would absorb their entries);
+   - a declared child must still be a direct child;
+   - an undeclared nested `.gpg-id` is adopted only if its own signature
+     verifies for its folder ("catch-up" after a gpg bootstrap); otherwise
+     the re-sign is refused until it is deleted or signed;
+   - a new boundary (F without `.gpg-id`) must already be declared by its
+     parent (declare, then create), and may not be created above existing
+     nested boundaries.
+4. **No absorption (core).** `reencryptFolder` refuses if the declared
+   children do not match the nested `.gpg-id`s it skips, and refuses any
+   governed entry whose PKESK recipient key ids do not include every current
+   non-escrow recipient of the governing `.gpg-id` (`ReencryptError` listing
+   paths and missing fingerprints). Such an entry was encrypted for a
+   narrower set, e.g. a deleted boundary. Entries with an anonymous recipient
+   (`gpg --throw-keyids`) cannot be checked and are let through.
+
+Boundary removal (merging a child back into its parent) is not supported in
+Phase 1: devices that verified the child keep refusing until their derived
+trust state is reset (re-pin or reset the anchors).
 
 ## Recipient ids
 
@@ -111,7 +174,9 @@ commit base. Device state comes from the locked trust environment.
 3. `gpgIdSignature` null → `signature-missing`.
 4. Parse: exactly one packet, type 0x00, v4/v6, creation time present; else
    `signature-invalid`.
-5. Verify over the exact bytes against each key in `allowed(folder)`. A
+5. Verify over the exact bytes against each key in `allowed(folder)` (only
+   key files named after the signature's issuer are tried to name an
+   unauthorized signer, at most 4: bounded cost). A
    signature counts for key K when:
    - the issuer key id names K's primary key or a subkey, and the issuer
      fingerprint subpacket matches it if present;
@@ -127,15 +192,24 @@ commit base. Device state comes from the locked trust environment.
 
    If the signature verifies against some other store key → `unknown-signer`
    (with that fingerprint). Otherwise → `signature-invalid`.
-6. Folder notation missing or ≠ `/<folder>` → `signature-invalid`.
+6. Folder notation missing or ≠ `/<folder>`, or malformed `child@g00pass`
+   declarations → `signature-invalid`.
 7. Committed sets only: signature older than the newest one this device
    accepted for this folder → `replayed`.
 8. Every recipient is a full primary fingerprint (§Recipient ids) → else
    `weak-recipient`.
+8a. Boundaries (§Child boundaries): declared chain up to the root, then for
+    committed sets the vanished-boundary check for the write target, for
+    proposed sets the exact expected children → `boundary-undeclared` /
+    `boundary-vanished` (or the parent's code, e.g. `signature-invalid`).
 9. Every root escrow fingerprint is a recipient → else `escrow-missing`. This
-   now applies to committed sets too (recovery.md).
+   now applies to committed sets too (recovery.md). It is checked LAST, so
+   `escrow-missing` implies every other check passed; approvals rely on this
+   to repair escrow (access-requests.md §Approving).
 10. `ok`. A warning `admins-file-unverified:<G>` is added for every invalid
-    admins file on the path. The replay high-water mark is raised only now.
+    admins file on the path, and `boundary-vanished:<child>` for vanished
+    declared children. Only now are the replay high-water marks raised and
+    the boundary recorded in the device-local set.
 
 ### Proposed recipient lists (approve / remove / re-encrypt)
 
@@ -147,10 +221,11 @@ the same hook with `proposed: true`:
   file in `extraChanges`, new `.public-keys`) can never authorize their own
   signer (tested).
 - The signature must be produced over the exact final text, after the
-  escrow merge. With `reencryptFolder`, pass
-  `gpgIdSignature: (text) => signGpgId(text, folder, operatorKey)`. The core
-  calls it with the exact bytes it will commit, and the result goes into the
-  same commit.
+  escrow merge, declaring the expected child boundaries. With
+  `reencryptFolder`, pass
+  `gpgIdSignature: (text, { children }) => signGpgId(text, folder, operatorKey, { children })`.
+  The core calls it with the exact bytes it will commit, and the result goes
+  into the same commit.
 - The approver must therefore be an anchor (any folder) or a verified admin of
   the folder or an ancestor (non-root). Root proposals need an anchor.
 - No replay check, since the signature is fresh. The high-water mark is
@@ -165,7 +240,11 @@ the same hook with `proposed: true`:
 | Same, on a device that never saw the newer version (new device, cleared storage) | **NOT prevented.** The old signature is genuine. Mitigation: branch protection / CODEOWNERS on `.gpg-id*`, and review of the commit history. |
 | Replay an older root after an anchor rollover | Prevented on devices that saw the newer root; otherwise the old root must still be signed by a *currently pinned* anchor |
 | Strip revocation or expiry self-signatures from a signer's key file (attacker holds the compromised private key) | **NOT prevented.** Key state comes from the store. Remove compromised keys from the anchors (rollover) or the admins file instead of relying on revocation alone. |
-| Old admins file version | Prevented on devices with a cached newer serial (folder-admins.md) |
+| Old admins file version | Prevented on devices with a cached newer serial, and on fresh devices when reachable history shows a newer serial (folder-admins.md) |
+| Delete a nested `.gpg-id` (+ `.sig`) to move its entries under the parent | **Prevented** on every device when the parent's signature declares the child (`boundary-vanished`), and on devices that verified the child before even if not declared. Re-encrypting the parent refuses entries not encrypted to all current parent members (PKESK check) |
+| Create a nested `.gpg-id` to keep entries out of the parent's re-encrypt | **Prevented**: undeclared boundaries are not writable, and a parent re-sign refuses (or, if validly signed, adopts) them |
+| Replay an older parent `.gpg-id` + `.sig` that did not declare the child, and delete the child | Existing devices: `replayed` / known-boundary set. **Fresh device: NEW writes into the child's folder are encrypted to the old parent set.** Existing child entries are still protected on the parent's re-encrypt by the PKESK check. Same residual class as the same-folder replay above |
+| Delete the child and re-sign the parent without the declaration | Needs an authorized signer of the parent (`unknown-signer` otherwise); g00pass itself never drops a declaration |
 
 ## Client behaviour
 
@@ -185,9 +264,34 @@ the same hook with `proposed: true`:
 ## Producing signatures
 
 - **Approve or remove (`reencryptFolder`):** `gpgIdSignature: (text) => signGpgId(text, folder, operatorKey)`.
-- **Bootstrap or migration:** sign with gpg or pass as above. An in-app
-  "Sign all recipient lists" action for global admins is still a later
-  feature.
+- **Bootstrap or migration:** sign with gpg or pass as above, adding one
+  `--sig-notation child@g00pass=/<child>` per direct child boundary. An
+  in-app "Sign all recipient lists" action for global admins is still a
+  later feature.
+
+### Migrating an existing store (breaking change)
+
+Signatures made before child boundaries existed declare no children, so
+every nested boundary becomes `boundary-undeclared` (not writable) until its
+parent is re-signed with the declarations. Work top-down:
+
+```sh
+# root (a pinned global admin), declaring every top-level boundary:
+gpg -u <ANCHOR FPR> --sig-notation folder@g00pass=/ \
+    --sig-notation child@g00pass=/infra --sig-notation child@g00pass=/clients \
+    --detach-sign -o .gpg-id.sig .gpg-id
+# each folder with nested boundaries (an admin of that folder or an ancestor):
+gpg -u <ADMIN FPR> --sig-notation folder@g00pass=/infra --sig-notation child@g00pass=/infra/prod \
+    --detach-sign -o infra/.gpg-id.sig infra/.gpg-id
+# or with pass:
+PASSWORD_STORE_SIGNING_KEY=<FPR> \
+PASSWORD_STORE_GPG_OPTS="--sig-notation folder@g00pass=/infra --sig-notation child@g00pass=/infra/prod" \
+pass init -p infra <FPR…>
+```
+
+`gpg --list-packets infra/.gpg-id.sig` shows the notations. Once the root
+declares a folder, any g00pass approval in that folder re-signs it with its
+validly signed children declared automatically.
 
 ## Test cases (all in `test/trust-policy.test.ts`)
 
@@ -212,3 +316,14 @@ signer, weak ids, swapped recipient or signer key files, escrow removed,
 future-dated, text-mode, multi-packet and garbage signatures, unhashed notation
 injection, same-folder replay, and proposed changes by a non-admin, without a
 signature, for the wrong folder, or self-authorized via `extraChanges`.
+
+Child boundaries (`test/boundaries.test.ts`, `test/security-probes.test.ts` "H2"):
+deleted child on a fresh device (writes and parent approval refused, engine
+refuses directly), device-known boundary with a parent that never declared it
+or a newer parent signature that "forgot" it, worst case on a fresh device
+(PKESK check), forging the parent declaration away, re-sign carries the
+declarations, undeclared child not writable / adopted when validly signed /
+blocking when not, wrong declared children, malformed and nested
+declarations, declare-then-create of a new boundary, companion inside a
+vanished boundary, deleted intermediate boundary, replayed parent on an
+existing device. Bounded signer identification: `test/hardening.test.ts` (L7).
