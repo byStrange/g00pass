@@ -138,6 +138,20 @@ describe('child boundary declarations', () => {
     expect(await code(write(declared, 'infra/new/b'))).toBe('ok');
   });
 
+  it('self-review: tampered parent (invalid signature) + deleted child cannot be re-signed via the raw engine', async () => {
+    const s = await derive(await store('b9'), {
+      'infra/.gpg-id': txt(A, C), // D silently removed so that prod entries would "fit"; signature now invalid
+      'infra/prod/.gpg-id': null,
+      'infra/prod/.gpg-id.sig': null,
+    });
+    const r = reencryptFolder('infra', [A.fpr, C.fpr], {
+      snapshot: s, writer: new MemoryWriter(s), decryptionKeys: [A.priv],
+      gpgIdSignature: (t, c) => signGpgId(t, 'infra', A.priv, { children: c.children }),
+    });
+    expect(await code(r)).toBe('signature-invalid');
+    expect(s.hasFile('infra/prod/p.gpg')).toBe(true);
+  });
+
   it('a companion file inside a vanished boundary is refused', async () => {
     const s = await derive(await store('b6'), { 'infra/prod/.gpg-id': null, 'infra/prod/.gpg-id.sig': null });
     const r = writeEntry({ snapshot: s, writer: new MemoryWriter(s), entry: 'infra/y', plaintext: enc('y'), companions: [{ path: 'infra/prod/.g00pass-rotation', plaintext: enc('r') }] });

@@ -209,8 +209,9 @@ export type ExpectedChildren = { ok: true; children: readonly string[] } | Deny;
 /**
  * The child boundaries a re-signed `F/.gpg-id` must declare (approve, remove,
  * re-encrypt), computed from the CURRENT snapshot and device state:
- *  - every currently declared child (if F's committed signature verifies)
- *    and every device-known boundary below F must still exist;
+ *  - F's committed signature must verify (else its declarations are unknown);
+ *    every currently declared child and every device-known boundary below F
+ *    must still exist;
  *  - a declared child must still be a DIRECT child (no new boundary between);
  *  - an undeclared nested `.gpg-id` is only adopted if its own signature
  *    verifies for its folder (otherwise: delete it or have an admin sign it);
@@ -229,9 +230,12 @@ export async function expectedChildBoundaries(snapshot: StoreSnapshot, folder: s
   }
   let declared: readonly string[] = [];
   if (exists) {
+    // If F's current signature does not verify, its declarations are unknown:
+    // a re-sign could silently drop a deleted child. Refuse (C1 likewise
+    // refuses to re-sign an unverified list).
     const dc = await declaredChildren(snapshot, f, signal);
-    if (dc.ok) declared = dc.children;
-    else if (f === '') return dc;
+    if (!dc.ok) return deny(dc.code, `the current ${folderLabel(f)}.gpg-id signature does not verify (${dc.reason}), so its declared child boundaries are unknown; an authorized admin must re-sign it first`);
+    declared = dc.children;
   }
   const gone = vanishedChildren(snapshot, storeId, f, declared);
   if (gone.length) {

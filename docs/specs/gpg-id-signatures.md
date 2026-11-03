@@ -93,6 +93,8 @@ The policy (`src/core/boundaries.ts`) enforces, on top of the per-folder checks:
 3. **Re-signing F (approve / remove / re-encrypt).** The new signature must
    declare exactly the expected children (`TrustHook.childBoundaries`, which
    the core passes to the signer callback `(text, { folder, children })`):
+   - F's current signature must verify (otherwise its declarations are
+     unknown and the re-sign is refused);
    - every child declared by F's current verified signature, and every
      device-known boundary below F, must still exist (else refused:
      re-encrypting would absorb their entries);
