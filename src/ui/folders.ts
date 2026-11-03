@@ -41,6 +41,8 @@ export interface FoldersDeps {
   setStatus: (text: string, isError?: boolean) => void;
   /** Store changed: reload, keeping `note` (the action's result) visible. */
   onChanged: (note?: string) => void;
+  /** Remembers the opened folder across re-renders (owned by the app). */
+  memory?: { folder: string | null };
 }
 
 const errMsg = (e: unknown) => (e instanceof G00passError ? e.message : 'Unexpected error');
@@ -63,37 +65,50 @@ async function userIdsOf(snapshot: StoreSnapshot, fpr: string): Promise<string> 
  * the plan on the commit base and refuses if its digest changed.
  */
 export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () => void } {
-  const select = h('select', { 'aria-label': 'Folder' });
+  const list = h('div', { class: 'folder-list', role: 'list', 'aria-label': 'Folders' });
   const body = h('div', { class: 'folder-admin' });
   const el = h(
     'section',
-    { class: 'card folders-card' },
-    h('h2', {}, 'Manage folder'),
-    h('p', { class: 'hint' }, 'Remove members, track rotations, create or remove sub-folders with their own recipients. Needs your unlocked key; you must be an admin and a recipient of the folder.'),
-    h('div', { class: 'row' }, select, h('button', { type: 'button', onclick: () => void show() }, 'Open')),
-    body,
+    { class: 'panel folders-card' },
+    h('div', { class: 'panel-head' }, h('h3', {}, 'Folders')),
+    h('p', { class: 'hint' }, 'Pick a folder to see who has access, invite people, remove them, or split it into sub-folders.'),
+    h('div', { class: 'folders-layout' }, list, body),
   );
+  let current = '';
 
   const fresh = (signal?: AbortSignal) => GitHubSnapshot.load(deps.client, deps.getConfig(), { signal });
   const writer = () => new GitHubWriter(deps.client, deps.getConfig());
 
   /** Folder currently opened (re-opened after a reload so results stay visible). */
-  let opened: string | null = null;
+  const memory = deps.memory ?? { folder: null };
+  let opened: string | null = memory.folder;
 
   function refresh() {
     const s = deps.getSnapshot();
-    const cur = select.value;
-    clear(select);
+    clear(list);
     clear(body);
     if (!s) return;
     const folders = s.listFiles().filter((p) => p === '.gpg-id' || p.endsWith('/.gpg-id')).map(dirname).sort();
-    for (const f of folders) select.append(h('option', { value: f }, label(f)));
-    if (folders.includes(cur)) select.value = cur;
+    for (const f of folders) {
+      const depth = f ? f.split('/').length : 0;
+      list.append(h('button', {
+        type: 'button',
+        role: 'listitem',
+        class: `folder-btn depth-${Math.min(depth, 4)}`,
+        'aria-pressed': String(opened === f),
+        onclick: () => {
+          current = f;
+          for (const b of list.children) b.setAttribute('aria-pressed', String(b === list.children[folders.indexOf(f)]));
+          void show();
+        },
+      }, label(f)));
+    }
     if (opened !== null && folders.includes(opened)) {
-      select.value = opened;
+      current = opened;
       void show();
     } else {
       opened = null;
+      body.append(h('p', { class: 'hint empty' }, 'Select a folder.'));
     }
   }
 
@@ -150,9 +165,10 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
   }
 
   async function show() {
-    const folder = select.value;
+    const folder = current;
     const snapshot = deps.getSnapshot();
     opened = folder;
+    memory.folder = folder;
     clear(body);
     if (!snapshot || !snapshot.hasFile(joinPath(folder, '.gpg-id'))) return;
     const key = deps.session.unlockedKey;
@@ -161,7 +177,7 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
 
     // ---- members ----
     const members = await folderRecipientFingerprints(snapshot, folder);
-    const list = h('ul', { class: 'fprs' });
+    const list = h('ul', { class: 'members' });
     for (const fpr of members) {
       const rm = h('button', { type: 'button', class: 'danger', disabled: !key || fpr === op }, 'Remove…');
       rm.addEventListener('click', async () => {
@@ -192,9 +208,17 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
           deps.setStatus(errMsg(e), true);
         }
       });
-      list.append(h('li', {}, h('span', { class: 'mono' }, formatFingerprint(fpr)), ' ', h('span', { class: 'hint uid', dir: 'auto' }, await userIdsOf(snapshot, fpr)), ' ', fpr === op ? h('span', { class: 'badge' }, 'you') : rm));
+      const uid = await userIdsOf(snapshot, fpr);
+      const name = uid.replace(/\s*<[^>]*>.*$/, '').trim() || uid;
+      list.append(h('li', { class: 'member' },
+        h('div', { class: 'member-who' },
+          h('div', {}, h('b', { dir: 'auto', class: 'uid' }, name), fpr === op ? h('span', { class: 'badge' }, 'you') : ''),
+          h('div', { class: 'hint uid', dir: 'auto' }, uid === name ? '' : uid),
+          h('div', { class: 'fpr mono hint' }, formatFingerprint(fpr))),
+        fpr === op ? '' : rm));
     }
     body.append(h('h3', {}, `Members of ${label(folder)}`), list, escrow.length ? h('p', { class: 'hint' }, 'The escrow (recovery) key is always a recipient and cannot be removed.') : '');
+    body.append(inviteForm(folder));
 
     // ---- rotation checklist ----
     if (key) {
@@ -249,9 +273,6 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
       }
     });
     body.append(createForm);
-
-    // ---- invite ----
-    body.append(inviteForm(folder));
 
     // ---- remove sub-folder (merge into parent) ----
     if (folder !== '') {

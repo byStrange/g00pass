@@ -48,6 +48,24 @@ function checkNumber(n: number): void {
 }
 
 /**
+ * State + labels of one issue (the requester polls their own request).
+ * UX only: issue metadata is untrusted; real access shows when entries decrypt.
+ */
+export async function getIssueStatus(
+  client: GitHubClient,
+  repo: IssueRepo,
+  issueNumber: number,
+  signal?: AbortSignal,
+): Promise<{ state: 'open' | 'closed'; labels: string[] }> {
+  checkNumber(issueNumber);
+  const i = await client.request<RawIssue>('GET', `${issuesBase(repo)}/${issueNumber}`, undefined, signal);
+  return {
+    state: i.state === 'closed' ? 'closed' : 'open',
+    labels: (i.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? ''))).filter(Boolean),
+  };
+}
+
+/**
  * List OPEN issues (pull requests are skipped), newest first. Discovery does
  * not depend on labels: callers filter on the body marker. Capped at `maxPages`
  * pages of 100 to respect rate limits.
