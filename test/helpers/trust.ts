@@ -14,7 +14,21 @@ export const STORE_ID = 'acme/secrets|';
 /** History of a file as a list of whole-store states, newest first. */
 export class FakeHistory implements FileHistory {
   reads = 0;
+  /** Merge commits in any range (tests model a merge by listing it plus its parents' states in `hidden`). */
+  mergeList: { sha: string; parents: string[] }[] = [];
+  /** States not listed by versions() (pruned by history simplification), by commitSha. */
+  hidden: StoreSnapshot[] = [];
+  /** null simulates a range too large to check. */
+  mergesResult: 'ok' | null = 'ok';
   constructor(public states: StoreSnapshot[]) {}
+  async merges() {
+    return this.mergesResult === null ? null : this.mergeList;
+  }
+  async readAt(commit: string, path: string) {
+    const s = [...this.states, ...this.hidden].find((x) => x.commitSha === commit);
+    if (!s) throw new Error(`unknown commit ${commit}`);
+    return s.readFile(path);
+  }
   async *versions(path: string, companions: readonly string[], opts: { limit: number }) {
     let n = 0;
     for (const s of this.states) {

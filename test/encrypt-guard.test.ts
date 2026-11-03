@@ -39,4 +39,24 @@ describe('L5: runtime encrypt guard (installEncryptGuard)', () => {
     const armored = await encryptToVerified(new TextEncoder().encode('hello'), set, { armor: true });
     expect(await decryptText(armored, alice)).toBe('hello');
   });
+
+  it('re-review: blocks assembling a message from packets (PKESK.encrypt / SKESK.encrypt) outside encryptToVerified', async () => {
+    const enc = (await alice.priv.toPublic().getEncryptionKey()).keyPacket;
+    type Encryptable = { encrypt(k: unknown): Promise<void> };
+    const PK = openpgp.PublicKeyEncryptedSessionKeyPacket as unknown as { fromObject(o: object): Encryptable };
+    const pkesk = PK.fromObject({
+      version: 3,
+      encryptionKeyPacket: enc,
+      anonymousRecipient: false,
+      sessionKey: new Uint8Array(32),
+      sessionKeyAlgorithm: openpgp.enums.symmetric.aes256,
+    });
+    await expect(pkesk.encrypt(enc)).rejects.toThrow(/blocked/);
+    const skesk = new openpgp.SymEncryptedSessionKeyPacket() as unknown as Encryptable;
+    await expect(skesk.encrypt('pw')).rejects.toThrow(/blocked/);
+    // An authorized encryption to the same key does not leave it authorized afterwards.
+    const store = new MemoryStore({ '.gpg-id': `${alice.fpr}\n`, [`.public-keys/${alice.fpr}`]: alice.armoredPublic });
+    await encryptToVerified(new TextEncoder().encode('x'), await verifyRecipients(store, { folder: '' }));
+    await expect(pkesk.encrypt(enc)).rejects.toThrow(/blocked/);
+  });
 });

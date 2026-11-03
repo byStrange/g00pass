@@ -27,4 +27,25 @@ describe('GitHubFileHistory', () => {
     expect(list.searchParams.get('sha')).toBe(head); // bound to the snapshot commit, not the branch
     expect(list.searchParams.get('path')).toBe('store/infra/.g00pass-admins.json');
   });
+
+  it('merges(): pages the compare API, returns merge commits, fails closed on non-linear or huge ranges', async () => {
+    const head = 'a'.repeat(40);
+    const base = 'b'.repeat(40);
+    const c = (n: number, parents: number) => ({ sha: n.toString(16).padStart(40, '0'), parents: Array.from({ length: parents }, (_, i) => ({ sha: (n * 10 + i + 1).toString(16).padStart(40, '0') })) });
+    let reply: (page: number) => unknown = () => ({});
+    const fetch = (async (url: string) => {
+      const u = new URL(url);
+      expect(u.pathname).toBe(`/repos/acme/secrets/compare/${base}...${head}`);
+      return new Response(JSON.stringify(reply(Number(u.searchParams.get('page')))), { status: 200 });
+    }) as typeof globalThis.fetch;
+    const h = new GitHubFileHistory(new GitHubClient({ token: () => null, fetch }), { owner: 'acme', repo: 'secrets', branch: 'main' }, head);
+    reply = (page) => ({ status: 'ahead', total_commits: 150, commits: page === 1 ? Array.from({ length: 100 }, (_, i) => c(i + 1, i === 5 ? 2 : 1)) : Array.from({ length: 50 }, (_, i) => c(i + 200, 1)) });
+    expect((await h.merges(base, {}))?.map((m) => m.sha)).toEqual([c(6, 2).sha]);
+    reply = () => ({ status: 'diverged', total_commits: 1, commits: [c(1, 1)] });
+    expect(await h.merges(base, {})).toBeNull();
+    reply = () => ({ status: 'ahead', total_commits: 5000, commits: [] });
+    expect(await h.merges(base, {})).toBeNull();
+    expect(await h.merges(head, {})).toEqual([]);
+    expect(await h.merges('nope', {})).toBeNull();
+  });
 });

@@ -8,6 +8,7 @@ import { loadKeyByFingerprint, parseDetachedSignature, signDetached, verifyDetac
 import type { FileChange, StoreSnapshot } from './store';
 import { readMap, trustEnvironment, updateMap } from './trust-env';
 import { fingerprintOf } from './keys';
+import type { FileHistory } from './github/history';
 
 /**
  * FOLDER ADMINS (docs/specs/folder-admins.md).
@@ -216,7 +217,11 @@ async function verifyAdminsFileUncached(ctx: Ctx, folder: string): Promise<Admin
   type Hist = { digest: string; v: Version | string } | null;
   const window: Hist[] = [];
   let lastDigest: string | null | undefined;
+  let oldestCommit: string | null = null;
+  let listed = 0;
   for await (const n of hist.versions(path, [joinPath(folder, ADMINS_SIG)], { limit: MAX_CHAIN_VERSIONS + 1, signal: ctx.signal })) {
+    listed++;
+    oldestCommit = n.commitSha;
     const [b, sg] = n.files;
     const digest = b ? await sha256Digest(b) : null;
     if (digest === lastDigest) continue;
@@ -224,6 +229,8 @@ async function verifyAdminsFileUncached(ctx: Ctx, folder: string): Promise<Admin
     window.push(b && digest ? { digest, v: await checkVersion(ctx, folder, b, sg ?? null) } : null);
   }
   if (!window[0] || window[0].digest !== cur.digest) return invalid('history does not match the snapshot (the newest version in history is not the current file)');
+  const hidden = await hiddenByMerges(ctx, hist, path, oldestCommit, window.map((w) => w?.digest ?? null), listed <= MAX_CHAIN_VERSIONS);
+  if (hidden) return invalid(hidden);
 
   // Fork / rollback scan: removal is final. No genuine (signature-valid)
   // version in reachable history may carry the current serial with other
@@ -273,6 +280,46 @@ async function verifyAdminsFileUncached(ctx: Ctx, folder: string): Promise<Admin
     }
     v = prev;
   }
+}
+
+/** Merges in the range examined for hidden versions (beyond this: fail closed). */
+export const MAX_RANGE_MERGES = 50;
+
+/**
+ * `commits?path=` simplifies history: at a merge that is TREESAME to one
+ * parent for `path`, git follows only that parent, so versions on the other
+ * parents' lineages never appear in `versions()`. A writer can use that to
+ * hide the admins version that removed them (fork) or a newer one (rollback)
+ * without force-pushing. For every merge in oldest..head, each parent's
+ * content must be a version the listed history already shows (or "absent"
+ * when the listing reaches back to before the file existed); otherwise some
+ * history was hidden and the chain / fork scan cannot be trusted.
+ * Returns a reason when the history cannot be verified, else null.
+ */
+async function hiddenByMerges(
+  ctx: Ctx,
+  hist: FileHistory,
+  path: string,
+  oldestCommit: string | null,
+  shown: readonly (string | null)[],
+  complete: boolean,
+): Promise<string | null> {
+  if (!oldestCommit) return 'history is empty';
+  const merges = await hist.merges(oldestCommit, { signal: ctx.signal });
+  if (merges === null) return 'the history of the admins file is too long or not linear to verify (merges cannot be checked); ask a global admin to re-sign it';
+  if (merges.length > MAX_RANGE_MERGES) return `the history of the admins file contains more than ${MAX_RANGE_MERGES} merges; ask a global admin to re-sign it`;
+  const known = new Set(shown.map((d) => d ?? 'absent'));
+  if (complete) known.add('absent');
+  for (const m of merges) {
+    for (const p of m.parents) {
+      const b = await hist.readAt(p, path, ctx.signal);
+      const d = b ? await sha256Digest(b) : 'absent';
+      if (!known.has(d)) {
+        return `history contains a merge (${m.sha.slice(0, 12)}) whose parent ${p.slice(0, 12)} holds an admins file version that the file's history does not show (hidden by the merge); the chain cannot be verified`;
+      }
+    }
+  }
+  return null;
 }
 
 /** Verify `<folder>/.g00pass-admins.json` in `snapshot` (see module doc). */

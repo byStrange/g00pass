@@ -76,7 +76,7 @@ const approveOpts = async (req: ParsedAccessRequest, over: Record<string, unknow
     loadSnapshot: async () => store,
     writer,
     operatorKey,
-    confirmation: { fingerprintSuffix: req.fingerprint.slice(-8), acknowledgeUninvited: true, approvedPlan: plan?.digest ?? 'sha256:none' },
+    confirmation: { fingerprintSuffix: req.fingerprint.slice(-16), acknowledgeUninvited: true, approvedPlan: plan?.digest ?? 'sha256:none' },
     requestRef: 'acme/requests#7',
     ...over,
   };
@@ -139,7 +139,7 @@ describe('approveAccessRequest', () => {
   it('refuses without the typed fingerprint suffix (L4) or without the approved plan', async () => {
     const req = await request(bob);
     const base = await approveOpts(req);
-    for (const fingerprintSuffix of ['', carol.fpr.slice(-8), req.fingerprint, req.fingerprint.slice(-7), 'zzzzzzzz']) {
+    for (const fingerprintSuffix of ['', carol.fpr.slice(-16), req.fingerprint, req.fingerprint.slice(-8), req.fingerprint.slice(-15), 'zzzzzzzzzzzzzzzz']) {
       await expect(approveAccessRequest(req, { ...base, confirmation: { ...base.confirmation, fingerprintSuffix } })).rejects.toMatchObject({ code: 'fingerprint-not-confirmed' });
     }
     await expect(approveAccessRequest(req, { ...base, confirmation: { ...base.confirmation, acknowledgeUninvited: false } })).rejects.toMatchObject({

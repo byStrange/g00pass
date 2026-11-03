@@ -2,6 +2,7 @@ import { GitHubApiError } from '../errors';
 import { joinPath, normalizePath } from '../paths';
 import { type GitHubClient, type GitHubRepo, repoPath } from './client';
 
+
 /** One historic version of a file plus companion files, at one commit. */
 export interface FileVersion {
   readonly commitSha: string;
@@ -15,13 +16,33 @@ export interface FileVersion {
  * REACHABLE FROM THE SNAPSHOT COMMIT that touched `path`, newest first, so the
  * walk is bound to the same history the snapshot was taken from.
  */
+export interface MergeCommit {
+  readonly sha: string;
+  readonly parents: readonly string[];
+}
+
 export interface FileHistory {
   versions(
     path: string,
     companions: readonly string[],
     opts: { limit: number; signal?: AbortSignal },
   ): AsyncIterable<FileVersion>;
+  /**
+   * Merge commits reachable from the snapshot commit but not from `base`
+   * (i.e. in base..head). Null when the range is too large to check.
+   *
+   * Needed because `commits?path=` uses git's default history
+   * simplification: at a merge that is TREESAME to one parent for `path`,
+   * the other parents are pruned, so a writer can hide versions (e.g. the
+   * admins version that removed them) behind a merge without force-pushing.
+   */
+  merges(base: string, opts: { signal?: AbortSignal }): Promise<readonly MergeCommit[] | null>;
+  /** Content of store path `path` at `commit` (null: absent). */
+  readAt(commit: string, path: string, signal?: AbortSignal): Promise<Uint8Array | null>;
 }
+
+/** Commits in base..head examined for merges (beyond this: unverifiable, fail closed). */
+export const MAX_RANGE_COMMITS = 1000;
 
 function b64(s: string): Uint8Array {
   const bin = atob(s.replace(/\s+/g, ''));
@@ -61,7 +82,35 @@ export class GitHubFileHistory implements FileHistory {
     }
   }
 
-  private async readAt(ref: string, path: string, signal?: AbortSignal): Promise<Uint8Array | null> {
+  async merges(base: string, opts: { signal?: AbortSignal }): Promise<readonly MergeCommit[] | null> {
+    if (!SHA_RE.test(base)) return null;
+    if (base === this.commitSha) return [];
+    const out: MergeCommit[] = [];
+    const perPage = 100;
+    for (let page = 1; page <= MAX_RANGE_COMMITS / perPage; page++) {
+      const q = new URLSearchParams({ per_page: String(perPage), page: String(page) });
+      const r = await this.client.request<{ status?: unknown; total_commits?: unknown; commits?: { sha?: unknown; parents?: { sha?: unknown }[] }[] }>(
+        'GET',
+        repoPath(this.repo, `/compare/${base}...${this.commitSha}?${q.toString()}`),
+        undefined,
+        opts.signal,
+      );
+      // base must be an ancestor of head ("ahead"); anything else is not a linear range.
+      if (r?.status !== 'ahead' && r?.status !== 'identical') return null;
+      if (typeof r.total_commits !== 'number' || r.total_commits > MAX_RANGE_COMMITS) return null;
+      const commits = Array.isArray(r.commits) ? r.commits : [];
+      for (const c of commits) {
+        const parents = (Array.isArray(c?.parents) ? c.parents : []).map((p) => p?.sha);
+        if (typeof c?.sha !== 'string' || !SHA_RE.test(c.sha) || !parents.every((p): p is string => typeof p === 'string' && SHA_RE.test(p))) return null;
+        if (parents.length > 1) out.push({ sha: c.sha, parents });
+      }
+      if (page * perPage >= r.total_commits || commits.length < perPage) return out;
+    }
+    return null;
+  }
+
+  async readAt(ref: string, path: string, signal?: AbortSignal): Promise<Uint8Array | null> {
+    if (!SHA_RE.test(ref)) throw new GitHubApiError(0, 'invalid commit sha');
     const enc = this.repoRel(path).split('/').map(encodeURIComponent).join('/');
     try {
       const r = await this.client.request<{ type?: string; encoding?: string; content?: string }>(

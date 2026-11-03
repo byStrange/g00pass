@@ -166,7 +166,7 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
     const suffix = h('input', {
       autocomplete: 'off',
       spellcheck: 'false',
-      maxlength: '12',
+      maxlength: '24',
       inputmode: 'text',
       placeholder: `last ${FINGERPRINT_SUFFIX_LENGTH} characters`,
       'aria-label': `Last ${FINGERPRINT_SUFFIX_LENGTH} characters of the fingerprint, as the requester told you`,

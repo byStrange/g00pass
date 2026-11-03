@@ -188,7 +188,7 @@ wnUEARYKACcFgm…
    `escrow-missing`, which the approval repairs.
 9. The UI shows the fingerprint in groups of 4. The approver asks the
    requester for their fingerprint through another channel and **types its
-   last 8 characters** (`confirmation.fingerprintSuffix`); the core checks
+   last 16 characters** (64 bits; 8 characters = 32 bits can be ground with a vanity-key search) (`confirmation.fingerprintSuffix`); the core checks
    them against the request. This step is the only identity check. Anyone
    holding an invite link, or anyone who can edit issues, can submit a
    validly self-signed request.

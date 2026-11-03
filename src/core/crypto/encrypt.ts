@@ -14,7 +14,17 @@ import { type VerifiedRecipientSet, isVerifiedRecipientSet } from '../trust';
 
 /** Key arrays handed to openpgp by encryptToVerified (identity, not contents). */
 const authorizedKeyLists = new WeakSet<object>();
+/**
+ * Key packets (primary + subkeys) of the set encryptToVerified is currently
+ * encrypting to, reference-counted (concurrent calls may share keys). The
+ * packet-level guard only lets a PKESK be encrypted to one of these.
+ */
+const authorizedKeyPackets = new WeakMap<object, number>();
 let guardInstalled = false;
+
+function keyPacketsOf(keys: readonly { getKeys(): { keyPacket: object }[] }[]): object[] {
+  return keys.flatMap((k) => k.getKeys().map((x) => x.keyPacket));
+}
 
 function refuse(): never {
   throw new TrustError('?', 'OpenPGP encryption outside encryptToVerified() is blocked', 'not-verified');
@@ -25,7 +35,8 @@ function refuse(): never {
  * openpgp's `Message#encrypt` and `Message.encryptSessionKey` (which
  * `openpgp.encrypt` and `openpgp.encryptSessionKey` use) are replaced by
  * non-writable, non-configurable wrappers that only proceed for the exact key
- * array encryptToVerified passed in, and never for passwords. Code that
+ * array encryptToVerified passed in, and never for passwords; the
+ * session-key packet classes are guarded the same way. Code that
  * reaches openpgp some other way (e.g. a namespace import) therefore cannot
  * encrypt to an unverified set. Idempotent.
  */
@@ -39,6 +50,29 @@ export function installEncryptGuard(): void {
     if (typeof keys !== 'object' || keys === null || !authorizedKeyLists.has(keys)) refuse();
     if (Array.isArray(passwords) ? passwords.length > 0 : passwords != null) refuse();
   };
+  // Packet level: openpgp also exports the packet classes, so a message can be
+  // assembled by hand (PKESK.encrypt(keyPacket) + SEIPD.encrypt(sessionKey))
+  // without ever calling Message#encrypt. Guard the session-key packets too:
+  // a PKESK only for a key packet of the set being encrypted right now, and
+  // password-based SKESKs never.
+  const PK = openpgp.PublicKeyEncryptedSessionKeyPacket as unknown as { prototype: { encrypt: (this: unknown, key: unknown, ...rest: unknown[]) => Promise<unknown> } };
+  const SK = openpgp.SymEncryptedSessionKeyPacket as unknown as { prototype: { encrypt: (this: unknown, ...rest: unknown[]) => Promise<unknown> } };
+  const pkEncrypt = PK.prototype.encrypt;
+  Object.defineProperty(PK.prototype, 'encrypt', {
+    value: async function guardedPkeskEncrypt(this: unknown, key: unknown, ...rest: unknown[]) {
+      if (typeof key !== 'object' || key === null || !authorizedKeyPackets.has(key)) refuse();
+      return pkEncrypt.call(this, key, ...rest);
+    },
+    writable: false,
+    configurable: false,
+  });
+  Object.defineProperty(SK.prototype, 'encrypt', {
+    value: async function guardedSkeskEncrypt() {
+      refuse();
+    },
+    writable: false,
+    configurable: false,
+  });
   const encrypt = M.prototype.encrypt;
   const encryptSessionKey = M.encryptSessionKey;
   Object.defineProperty(M.prototype, 'encrypt', {
@@ -76,6 +110,8 @@ export async function encryptToVerified(
   const message = await openpgp.createMessage({ binary: plaintext });
   const encryptionKeys = [...recipients.keys];
   authorizedKeyLists.add(encryptionKeys);
+  const packets = keyPacketsOf(encryptionKeys);
+  for (const p of packets) authorizedKeyPackets.set(p, (authorizedKeyPackets.get(p) ?? 0) + 1);
   try {
     if (opts.armor) {
       return await openpgp.encrypt({ message, encryptionKeys, format: 'armored' });
@@ -83,5 +119,10 @@ export async function encryptToVerified(
     return await openpgp.encrypt({ message, encryptionKeys, format: 'binary' });
   } finally {
     authorizedKeyLists.delete(encryptionKeys);
+    for (const p of packets) {
+      const n = (authorizedKeyPackets.get(p) ?? 1) - 1;
+      if (n > 0) authorizedKeyPackets.set(p, n);
+      else authorizedKeyPackets.delete(p);
+    }
   }
 }

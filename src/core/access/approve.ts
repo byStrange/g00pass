@@ -46,7 +46,8 @@ export class ApprovalError extends G00passError {
 /** What the operator explicitly confirmed. The UI must fill this only from what the operator typed / ticked. */
 export interface ApprovalConfirmation {
   /**
-   * The LAST 8 hex characters of the requester's fingerprint, TYPED by the
+   * The LAST 16 hex characters (64 bits; 8 = 32 bits can be ground with a
+   * vanity-key search, cf. the "evil32" short key id collisions) of the requester's fingerprint, TYPED by the
    * operator from what the requester told them out of band (spaces and case
    * ignored). Must match the request's fingerprint.
    */
@@ -57,12 +58,12 @@ export interface ApprovalConfirmation {
   approvedPlan: string;
 }
 
-export const FINGERPRINT_SUFFIX_LENGTH = 8;
+export const FINGERPRINT_SUFFIX_LENGTH = 16;
 
 /** Does the typed suffix confirm `fingerprint`? */
 export function fingerprintSuffixMatches(typed: string, fingerprint: string): boolean {
   const t = typed.replace(/\s+/g, '').toUpperCase();
-  return /^[0-9A-F]{8}$/.test(t) && t === fingerprint.toUpperCase().slice(-FINGERPRINT_SUFFIX_LENGTH);
+  return t.length === FINGERPRINT_SUFFIX_LENGTH && /^[0-9A-F]+$/.test(t) && t === fingerprint.toUpperCase().slice(-FINGERPRINT_SUFFIX_LENGTH);
 }
 
 export interface ApproveOptions {

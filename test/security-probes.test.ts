@@ -91,7 +91,7 @@ describe('C1: approval must not re-sign an attacker-edited .gpg-id', () => {
           loadSnapshot: async () => store,
           writer,
           operatorKey: A.priv,
-          confirmation: { fingerprintSuffix: D.fpr.slice(-8), acknowledgeUninvited: true, approvedPlan: 'sha256:' + '0'.repeat(64) },
+          confirmation: { fingerprintSuffix: D.fpr.slice(-16), acknowledgeUninvited: true, approvedPlan: 'sha256:' + '0'.repeat(64) },
           requestRef: 'x#1',
         }),
       ),
