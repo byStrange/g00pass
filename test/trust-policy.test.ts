@@ -275,6 +275,25 @@ describe('signature format', () => {
     expect((await folderTrustStatus(g, 'infra')).code).toBe('signature-invalid');
   });
 
+  it('an unhashed folder notation injected into a valid signature is ignored (cannot retarget)', async () => {
+    const text = (new TextDecoder().decode((await base.readFile('infra/.gpg-id'))!));
+    const sig = await openpgp.readSignature({ binarySignature: (await base.readFile('infra/.gpg-id.sig'))! });
+    const pkt = sig.packets[0]!;
+    const name = enc('folder@g00pass');
+    const value = enc('/infra/prod');
+    const body = new Uint8Array(8 + name.length + value.length);
+    body.set([0x80, 0, 0, 0, 0, name.length, 0, value.length], 0);
+    body.set(name, 8);
+    body.set(value, 8 + name.length);
+    pkt.unhashedSubpackets.push({ type: 20, critical: false, body });
+    const forged = sig.write() as Uint8Array;
+    const parsed = await parseDetachedSignature(forged);
+    expect(parsed.packet.unhashedSubpackets.some((u) => u.type === 20)).toBe(true); // injection really present
+    expect(parsed.notations.get('folder@g00pass')).toEqual(['/infra']); // only the signed (hashed) one
+    const s = await derive(base, { 'infra/prod/.gpg-id': text, 'infra/prod/.gpg-id.sig': forged });
+    expect(await folderTrustStatus(s, 'infra/prod')).toMatchObject({ verified: false, code: 'signature-invalid' });
+  });
+
   it('gpg --detach-sign fixture (offline, folder-bound) verifies; plain pass signature is not folder-bound', async () => {
     const fx = (f: string) => readFileSync(join(__dirname, 'fixtures/gpg', f));
     const GPG = '1C7F172FAFB0F0461DC02D26075D719D60EADF3D';

@@ -55,10 +55,8 @@ export interface TrustHook {
 }
 
 /**
- * TODO(trust): Phase 0 pass-through. Replace with the `.gpg-id.sig`
- * verification described in docs/specs/gpg-id-signatures.md (refuse on
- * missing/invalid signature). Until then the UI should show that recipient
- * signatures are NOT verified.
+ * Phase 0 pass-through, kept for core unit tests ONLY. Production installs
+ * `signatureTrustHook` (src/core/trust-policy.ts) in src/main.ts and locks it.
  */
 export const passThroughTrustHook: TrustHook = {
   name: 'pass-through (UNVERIFIED)',
@@ -67,7 +65,15 @@ export const passThroughTrustHook: TrustHook = {
   },
 };
 
-let installedHook: TrustHook = passThroughTrustHook;
+/** Default until src/main.ts installs the real policy: refuses everything (fail closed). */
+export const unconfiguredTrustHook: TrustHook = {
+  name: 'unconfigured (refuses all)',
+  async verify() {
+    return { ok: false, code: 'untrusted', reason: 'no trust policy installed' };
+  },
+};
+
+let installedHook: TrustHook = unconfiguredTrustHook;
 let hookLocked = false;
 
 /** Install the trust policy. Call once at app start-up (and in tests). Returns the previous hook. */

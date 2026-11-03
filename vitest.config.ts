@@ -5,6 +5,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],
+    // Core unit tests run with the pass-through hook; production defaults to fail closed.
+    setupFiles: ['test/setup.ts'],
     // Low-memory machine: one worker, one file at a time.
     fileParallelism: false,
     maxWorkers: 1,

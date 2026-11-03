@@ -36,6 +36,15 @@ describe('trust choke-point (static guard, backs up the ESLint rule)', () => {
     expect(offenders).toEqual([]);
   });
 
+  it('production installs the signature trust hook and locks it', () => {
+    const main = code(join(ROOT, 'src/main.ts'));
+    expect(main).toMatch(/setTrustHook\(signatureTrustHook\);\s*lockTrustHook\(\);/);
+    const trust = readFileSync(join(ROOT, 'src/core/trust.ts'), 'utf8');
+    expect(trust).toContain('let installedHook: TrustHook = unconfiguredTrustHook;');
+    const callers = srcFiles.filter((f) => /\bsetTrustHook\s*\(/.test(code(f)) && rel(f) !== 'src/core/trust.ts').map(rel);
+    expect(callers).toEqual(['src/main.ts']);
+  });
+
   it('encryptToVerified is the only exported encrypt and checks minted sets', () => {
     const s = readFileSync(join(ROOT, 'src/core/crypto/encrypt.ts'), 'utf8');
     expect(s).toContain('isVerifiedRecipientSet(recipients)');
