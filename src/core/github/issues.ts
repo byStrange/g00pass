@@ -1,5 +1,6 @@
 import { G00passError } from '../errors';
 import { type GitHubClient, type GitHubRepo, repoPath, validateRepo } from './client';
+import { REQUEST_LABEL } from '../requests/build';
 
 /**
  * Issue API used for access requests (docs/specs/access-requests.md).
@@ -8,7 +9,7 @@ import { type GitHubClient, type GitHubRepo, repoPath, validateRepo } from './cl
 
 export type IssueRepo = Pick<GitHubRepo, 'owner' | 'repo'>;
 
-export const LABEL_REQUEST = 'g00pass:access-request';
+export const LABEL_REQUEST = REQUEST_LABEL;
 export const LABEL_APPROVED = 'g00pass:approved';
 export const LABEL_REJECTED = 'g00pass:rejected';
 

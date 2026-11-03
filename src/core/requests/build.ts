@@ -1,4 +1,5 @@
 import { createCleartextMessage, sign, type PrivateKey } from 'openpgp';
+import { canonicalJson, rfc3339 } from '../canonical';
 import { G00passError } from '../errors';
 import { normalizePath } from '../paths';
 
@@ -57,29 +58,6 @@ export function b64url(bytes: Uint8Array): string {
   let s = '';
   for (const b of bytes) s += String.fromCharCode(b);
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function sortKeysDeep(v: unknown): unknown {
-  if (Array.isArray(v)) return v.map(sortKeysDeep);
-  if (v && typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    return Object.fromEntries(
-      Object.keys(o)
-        .sort()
-        .map((k) => [k, sortKeysDeep(o[k])]),
-    );
-  }
-  return v;
-}
-
-/** store-layout.md canonical JSON. */
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(sortKeysDeep(value), null, 2) + '\n';
-}
-
-/** RFC 3339 UTC without fractional seconds. */
-export function rfc3339(d: Date): string {
-  return d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
 export function groupFingerprint(fpr: string): string {

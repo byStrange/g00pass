@@ -1,5 +1,5 @@
 import { readCleartextMessage, verify, type PublicKey } from 'openpgp';
-import { canonicalJson } from '../access/canonical';
+import { canonicalJson } from '../canonical';
 import { fingerprintOf, parsePublicKey } from '../keys';
 import { StorePathError } from '../errors';
 import { normalizePath } from '../paths';
