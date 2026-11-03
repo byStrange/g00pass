@@ -26,8 +26,8 @@ export interface InboxDeps {
   deviceFingerprint: () => Promise<string | null>;
   session: Session;
   setStatus: (text: string, isError?: boolean) => void;
-  /** Called after a successful approval so the app can reload the store. */
-  onApproved: () => void;
+  /** Called after a successful approval so the app can reload the store; `note` is the result to keep showing. */
+  onApproved: (note: string, isError: boolean) => void;
 }
 
 const PHASES: Record<ReencryptProgress['phase'], string> = {
@@ -182,14 +182,13 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
           signal: abort.signal,
         });
         const failed = await finalizeApprovedIssue(deps.client, issueRepo, issue.number, res);
-        deps.setStatus(
+        deps.onApproved(
           `Approved in ${res.commitSha.slice(0, 7)}.` +
             (failed.length ? ` Could not update the issue (${failed.join(', ')}); close it manually.` : '') +
             (res.inviteConsumed ? ' The invite was used up. Now revoke the invite token on GitHub.' : r.inviteId ? ' Revoke the invite token on GitHub.' : ''),
           failed.length > 0,
         );
         card.remove();
-        deps.onApproved();
       } catch (e) {
         const aborted = e instanceof Error && e.name === 'AbortError';
         const changed = e instanceof G00passError && (e as { code?: string }).code === 'plan-changed';

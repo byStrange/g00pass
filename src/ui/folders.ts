@@ -39,8 +39,8 @@ export interface FoldersDeps {
   getSnapshot: () => StoreSnapshot | null;
   session: Session;
   setStatus: (text: string, isError?: boolean) => void;
-  /** Store changed (reload). */
-  onChanged: () => void;
+  /** Store changed: reload, keeping `note` (the action's result) visible. */
+  onChanged: (note?: string) => void;
 }
 
 const errMsg = (e: unknown) => (e instanceof G00passError ? e.message : 'Unexpected error');
@@ -77,6 +77,9 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
   const fresh = (signal?: AbortSignal) => GitHubSnapshot.load(deps.client, deps.getConfig(), { signal });
   const writer = () => new GitHubWriter(deps.client, deps.getConfig());
 
+  /** Folder currently opened (re-opened after a reload so results stay visible). */
+  let opened: string | null = null;
+
   function refresh() {
     const s = deps.getSnapshot();
     const cur = select.value;
@@ -86,6 +89,12 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
     const folders = s.listFiles().filter((p) => p === '.gpg-id' || p.endsWith('/.gpg-id')).map(dirname).sort();
     for (const f of folders) select.append(h('option', { value: f }, label(f)));
     if (folders.includes(cur)) select.value = cur;
+    if (opened !== null && folders.includes(opened)) {
+      select.value = opened;
+      void show();
+    } else {
+      opened = null;
+    }
   }
 
   /** A confirm box: plan view, review checkbox, action button. */
@@ -123,9 +132,7 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
         if (!key || !picked.length) return deps.setStatus(key ? 'Select the entries you rotated at their source.' : 'Unlock your key first.', true);
         try {
           await commitMarkRotated({ snapshot: await fresh(), writer: writer(), folder, entries: picked, operatorKey: key });
-          deps.setStatus(`Marked ${picked.length} entr${picked.length === 1 ? 'y' : 'ies'} as rotated.`);
-          deps.onChanged();
-          void show();
+          deps.onChanged(`Marked ${picked.length} entr${picked.length === 1 ? 'y' : 'ies'} as rotated.`);
         } catch (e) {
           deps.setStatus(errMsg(e), true);
         }
@@ -145,6 +152,7 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
   async function show() {
     const folder = select.value;
     const snapshot = deps.getSnapshot();
+    opened = folder;
     clear(body);
     if (!snapshot || !snapshot.hasFile(joinPath(folder, '.gpg-id'))) return;
     const key = deps.session.unlockedKey;
@@ -174,12 +182,10 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
               });
               const after = await fresh();
               const elsewhere = await memberAccessElsewhere(after, fpr, folder);
-              deps.setStatus(
+              deps.onChanged(
                 `Removed ${formatFingerprint(fpr)} from ${label(folder)}.` +
                   (elsewhere.length ? ` Still has access in: ${elsewhere.map((e) => `${label(e.folder)}${e.recipient ? '' : ' (admin only)'}`).join(', ')} — remove them there too.` : ''),
               );
-              deps.onChanged();
-              void show();
             }, true),
           );
         } catch (e) {
@@ -235,8 +241,7 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
         createForm.append(
           confirmBox(view, 'Create sub-folder', async () => {
             await createSubfolder(plan.folder, recips, { loadSnapshot: fresh, writer: writer(), operatorKey: k, approvedPlanDigest: plan.digest });
-            deps.setStatus(`Created ${label(plan.folder)}.`);
-            deps.onChanged();
+            deps.onChanged(`Created ${label(plan.folder)}.`);
           }),
         );
       } catch (e) {
@@ -274,8 +279,7 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
           rmForm.append(
             confirmBox(view, 'Remove sub-folder boundary', async () => {
               await removeSubfolder(folder, { loadSnapshot: fresh, writer: writer(), operatorKey: k, approvedPlanDigest: plan.digest });
-              deps.setStatus(`${label(folder)} merged into ${label(plan.parent)}.`);
-              deps.onChanged();
+              deps.onChanged(`${label(folder)} merged into ${label(plan.parent)}.`);
             }, true),
           );
         } catch (e) {
@@ -328,7 +332,8 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
             h('button', { type: 'button', onclick: () => clear(out) }, 'Done (hide link)')),
           h('p', { class: 'hint' }, `Invite ${inv.id} (${inv.record.role} on ${label(folder)}) expires ${inv.record.expiresAt}. Tell the newcomer the global admin fingerprints separately so they can check them.`),
         );
-        deps.onChanged();
+        // No reload here: it would re-render this card and hide the link, which is shown only once.
+        deps.setStatus('Invite created.');
       } catch (e) {
         deps.setStatus(errMsg(e), true);
       }

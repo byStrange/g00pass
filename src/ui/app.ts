@@ -249,12 +249,14 @@ function mountAppUnguarded(root: HTMLElement, invite: TakenInvite): void {
     }
   }
 
-  async function refresh() {
+  /** Reload the store. `note` (the result of the action that caused the reload) stays visible. */
+  async function refresh(note?: string, noteIsError = false) {
     if (!config.owner || !config.repo) return;
-    setStatus('Loading…');
+    setStatus(note ? `${note} Reloading…` : 'Loading…', noteIsError);
     try {
       snapshot = await GitHubSnapshot.load(client, config);
-      setStatus(`Loaded ${listEntries(snapshot).filter((e) => !isHiddenEntry(e)).length} entries at ${snapshot.commitSha.slice(0, 7)}.`);
+      const loaded = `Loaded ${listEntries(snapshot).filter((e) => !isHiddenEntry(e)).length} entries at ${snapshot.commitSha.slice(0, 7)}.`;
+      setStatus(note ? `${note} (${loaded})` : loaded, noteIsError);
       renderList();
       folders.refresh();
       await trust.refresh(snapshot, config).catch(() => setStatus('Could not evaluate recipient trust; treat this store as unverified.', true));
@@ -322,7 +324,7 @@ function mountAppUnguarded(root: HTMLElement, invite: TakenInvite): void {
     deviceFingerprint: async () => (await deviceKeyInfo().catch(() => null))?.fingerprint ?? null,
     session,
     setStatus,
-    onApproved: () => void refresh(),
+    onApproved: (note, isError) => void refresh(note, isError),
   });
 
   // ----- folder administration (remove member, rotation, sub-folders) -----
@@ -332,7 +334,7 @@ function mountAppUnguarded(root: HTMLElement, invite: TakenInvite): void {
     getSnapshot: () => snapshot,
     session,
     setStatus,
-    onChanged: () => void refresh(),
+    onChanged: (note) => void refresh(note),
   });
 
   // ----- invite link (newcomer) -----

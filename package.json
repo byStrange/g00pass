@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "e2e": "npm run build && vitest run -c vitest.e2e.config.ts",
+    "seed-demo-store": "node scripts/seed-demo-store.mjs"
   },
   "engines": {
     "node": ">=22.12.0"

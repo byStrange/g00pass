@@ -17,5 +17,5 @@
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "test", "vite.config.ts", "csp.config.ts", "vitest.config.ts"]
+  "include": ["src", "test", "scripts/seed", "vite.config.ts", "csp.config.ts", "vitest.config.ts"]
 }
