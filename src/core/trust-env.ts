@@ -67,8 +67,11 @@ function defaults(): TrustEnvironment {
 
 let env: TrustEnvironment | null = null;
 
+/** Current environment. Once the trust hook is locked it is frozen (its fields cannot be swapped). */
 export function trustEnvironment(): TrustEnvironment {
-  return (env ??= defaults());
+  const e = (env ??= defaults());
+  if (isTrustHookLocked() && !Object.isFrozen(e)) Object.freeze(e);
+  return e;
 }
 
 /** Override parts of the environment (tests). Throws once the trust hook is locked. */

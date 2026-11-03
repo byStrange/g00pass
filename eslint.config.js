@@ -48,6 +48,15 @@ export default tseslint.config(
           selector: "CallExpression[callee.object.name='localStorage'][callee.property.name='setItem'] > Literal[value=/token/i]",
           message: 'Tokens must never be stored in localStorage (memory or sessionStorage only).',
         },
+        {
+          // Message#encrypt / Message.encryptSessionKey / packet .encrypt(): any `.encrypt(` call
+          selector: "CallExpression[callee.type='MemberExpression'][callee.property.name=/^encrypt(SessionKey)?$/]",
+          message: 'Encrypt only via encryptToVerified() (trust choke-point); no Message#encrypt / .encrypt() calls.',
+        },
+        {
+          selector: "MemberExpression[computed=true][property.value=/^encrypt/]",
+          message: 'Encrypt only via encryptToVerified() (trust choke-point).',
+        },
       ],
     },
   },

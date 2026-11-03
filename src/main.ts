@@ -1,5 +1,5 @@
 import './ui/styles.css';
-import { lockTrustHook, setTrustHook, signatureTrustHook } from './core';
+import { getTrustHook, installEncryptGuard, isTrustHookLocked, lockTrustHook, setTrustHook, signatureTrustHook } from './core';
 import { mountApp } from './ui/app';
 
 // Trust policy: .gpg-id signatures + pinned anchors + folder admins
@@ -7,6 +7,10 @@ import { mountApp } from './ui/app';
 // environment (storage, store identity, history, clock).
 setTrustHook(signatureTrustHook);
 lockTrustHook();
+installEncryptGuard();
+// Fail closed if the trust policy is not the locked signature hook. The
+// message is also the marker scripts/check-dist.mjs looks for in the bundle.
+if (!isTrustHookLocked() || getTrustHook() !== signatureTrustHook) throw new Error('g00pass: trust policy is not locked');
 
 mountApp(document.getElementById('app') as HTMLElement);
 
