@@ -18,8 +18,13 @@ import { fingerprintOf } from './keys';
  *   - a trust anchor (effective anchors of a verified root), or
  *   - a verified admin of a STRICT ancestor folder (delegation/hierarchy), or
  *   - (serial > 1) listed in V(n-1).admins, where V(n-1) is valid, has
- *     serial n-1 and its bytes digest equals `previous` (chain of custody,
- *     found via the local cache or git history reachable from the snapshot).
+ *     serial n-1, its bytes digest equals `previous`, AND it is the actual
+ *     predecessor of V(n) in the git history reachable from the snapshot
+ *     (chain of custody; ends at a self-authorized or cached version).
+ * Removal is final: a version is invalid when reachable history holds a
+ * genuine version with the same serial and other bytes (fork) or a higher
+ * serial (rollback), or when anything at or below the cached serial is not
+ * the cached version. The cache is written only after full validation.
  * Admin authority is hierarchical: admins(F) = union of the valid admins
  * files of F and its ancestors (the root has none; anchors cover it).
  * Invalid / unverifiable files grant nothing and never block reads.
@@ -175,9 +180,12 @@ async function verifyAdminsFileUncached(ctx: Ctx, folder: string): Promise<Admin
     return invalid(`rolled back: this device already verified serial ${cached.serial}, file has serial ${cur.doc.serial}`);
   }
   if (cached && cached.serial === cur.doc.serial && cached.digest !== cur.digest) {
-    return invalid(`conflicting version: serial ${cur.doc.serial} differs from the one this device verified`);
+    return invalid(`conflicting version: serial ${cur.doc.serial} differs from the one this device verified (fork)`);
   }
 
+  // Cache ONLY after full validation, and only ever forwards: a version that
+  // conflicts with the cache never validates (above / in the walk below), so
+  // it can never overwrite it.
   const ok = (via: 'anchor' | 'ancestor-admin' | 'chain' | 'cache'): AdminsFileStatus => {
     if (!cached || cached.serial < cur.doc.serial) {
       updateMap(ADMINS_CACHE_STORAGE_KEY, isCacheEntry, (m) => {
@@ -189,43 +197,80 @@ async function verifyAdminsFileUncached(ctx: Ctx, folder: string): Promise<Admin
 
   const up = await ancestorAdmins(ctx, folder);
   const selfAuthorized = (v: Version) => ctx.anchors.has(v.doc.updatedBy) || up.has(v.doc.updatedBy);
-  if (ctx.anchors.has(cur.doc.updatedBy)) return ok('anchor');
-  if (up.has(cur.doc.updatedBy)) return ok('ancestor-admin');
-  if (cached && cached.serial === cur.doc.serial && cached.digest === cur.digest) return ok('cache');
+  const headVia = ctx.anchors.has(cur.doc.updatedBy) ? 'anchor' : up.has(cur.doc.updatedBy) ? 'ancestor-admin' : null;
+  // Exactly this version was fully validated on this device before.
+  if (cached && cached.serial === cur.doc.serial) return ok(headVia ?? 'cache');
 
-  // Chain of custody: walk back until a self-authorized or cached version.
+  if (!headVia && cur.doc.serial === 1) {
+    return invalid(`serial 1 signed by ${cur.doc.updatedBy}, who is neither a trust anchor nor an admin of a parent folder`);
+  }
+  const hist = trustEnvironment().history(ctx.snapshot);
+  if (!hist) {
+    // Without history neither the chain nor a rollback to an older,
+    // self-authorized version can be checked (documented residual risk).
+    return headVia ? ok(headVia) : invalid('chain of custody cannot be verified (no history available)');
+  }
+
+  // History reachable from the snapshot commit, newest first, consecutive
+  // identical contents collapsed. null = the file was absent (deleted).
+  type Hist = { digest: string; v: Version | string } | null;
+  const window: Hist[] = [];
+  let lastDigest: string | null | undefined;
+  for await (const n of hist.versions(path, [joinPath(folder, ADMINS_SIG)], { limit: MAX_CHAIN_VERSIONS + 1, signal: ctx.signal })) {
+    const [b, sg] = n.files;
+    const digest = b ? await sha256Digest(b) : null;
+    if (digest === lastDigest) continue;
+    lastDigest = digest;
+    window.push(b && digest ? { digest, v: await checkVersion(ctx, folder, b, sg ?? null) } : null);
+  }
+  if (!window[0] || window[0].digest !== cur.digest) return invalid('history does not match the snapshot (the newest version in history is not the current file)');
+
+  // Fork / rollback scan: removal is final. No genuine (signature-valid)
+  // version in reachable history may carry the current serial with other
+  // bytes, or a higher serial.
+  for (const h of window.slice(1)) {
+    if (!h || typeof h.v === 'string' || h.digest === cur.digest) continue;
+    if (h.v.doc.serial >= cur.doc.serial) {
+      return invalid(
+        h.v.doc.serial === cur.doc.serial
+          ? `fork: history contains a different serial ${cur.doc.serial}; the chain must be linear`
+          : `rolled back: history contains serial ${h.v.doc.serial}, newer than the current serial ${cur.doc.serial}`,
+      );
+    }
+  }
+  if (headVia) return ok(headVia);
+
+  // Chain of custody: each link must be the ACTUAL history predecessor of the
+  // version that cites it, one serial lower, list the signer as admin, and be
+  // genuine; the walk ends at a self-authorized version or at the version
+  // this device cached. Anything at or below the cached serial must BE the
+  // cached version.
   let v = cur;
-  let history: AsyncIterator<{ files: readonly (Uint8Array | null)[] }> | null = null;
-  for (let steps = 0; ; steps++) {
+  for (let i = 0; ; i++) {
+    if (cached && v.doc.serial <= cached.serial) {
+      if (v.doc.serial === cached.serial && v.digest === cached.digest) return ok('chain');
+      return invalid(`fork: serial ${v.doc.serial} in the chain differs from the version this device verified`);
+    }
+    if (v !== cur && selfAuthorized(v)) return ok('chain');
     if (v.doc.serial === 1) {
       return invalid(`serial 1 signed by ${v.doc.updatedBy}, who is neither a trust anchor nor an admin of a parent folder`);
     }
-    if (cached && cached.serial === v.doc.serial - 1 && cached.digest === v.doc.previous) {
-      return cached.admins.includes(v.doc.updatedBy)
-        ? ok('chain')
-        : invalid(`serial ${v.doc.serial} signed by ${v.doc.updatedBy}, who is not an admin in serial ${cached.serial}`);
+    const next = window[i + 1];
+    if (next === undefined) {
+      return i + 1 >= MAX_CHAIN_VERSIONS + 1
+        ? invalid(`chain of custody longer than ${MAX_CHAIN_VERSIONS} versions; ask a global admin to re-sign`)
+        : invalid(`chain of custody broken: serial ${v.doc.serial} has no predecessor in history`);
     }
-    if (steps >= MAX_CHAIN_VERSIONS) return invalid(`chain of custody longer than ${MAX_CHAIN_VERSIONS} versions; ask a global admin to re-sign`);
-    const hist = trustEnvironment().history(ctx.snapshot);
-    if (!hist) return invalid('chain of custody cannot be verified (no history available)');
-    history ??= hist.versions(path, [joinPath(folder, ADMINS_SIG)], { limit: MAX_CHAIN_VERSIONS + 1, signal: ctx.signal })[Symbol.asyncIterator]();
-    let prev: Version | null = null;
-    for (;;) {
-      const n = await history.next();
-      if (n.done) break;
-      const [b, s] = n.value.files;
-      if (!b || (await sha256Digest(b)) !== v.doc.previous) continue;
-      const pv = await checkVersion(ctx, folder, b, s ?? null);
-      if (typeof pv === 'string') return invalid(`previous version (serial ${v.doc.serial - 1}) is invalid: ${pv}`);
-      prev = pv;
-      break;
+    if (next === null) return invalid(`chain of custody broken: the admins file was deleted before serial ${v.doc.serial}`);
+    if (next.digest !== v.doc.previous) {
+      return invalid(`chain of custody broken: serial ${v.doc.serial} cites ${v.doc.previous}, but its predecessor in history is ${next.digest} (fork)`);
     }
-    if (!prev) return invalid(`chain of custody broken: no version with digest ${v.doc.previous} in history`);
+    if (typeof next.v === 'string') return invalid(`previous version (serial ${v.doc.serial - 1}) is invalid: ${next.v}`);
+    const prev = next.v;
     if (prev.doc.serial !== v.doc.serial - 1) return invalid(`serial jump: ${prev.doc.serial} -> ${v.doc.serial}`);
     if (!prev.doc.admins.includes(v.doc.updatedBy)) {
       return invalid(`serial ${v.doc.serial} signed by ${v.doc.updatedBy}, who is not an admin in serial ${prev.doc.serial}`);
     }
-    if (selfAuthorized(prev)) return ok('chain');
     v = prev;
   }
 }
