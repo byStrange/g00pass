@@ -14,6 +14,7 @@ import {
 import { h, clear } from './dom';
 import { deviceKeyInfo, forgetDeviceKey, loadDeviceKeyArmored, saveDeviceKey } from './keystore';
 import { createEnrollment } from './enroll';
+import { mountInbox } from './inbox';
 import { Session, copyWithAutoClear } from './session';
 import { createTrustPanel } from './trust';
 
@@ -263,6 +264,16 @@ export function mountApp(root: HTMLElement): void {
     }
   }
 
+  // ----- admin inbox (access requests) -----
+  const inbox = mountInbox({
+    client,
+    getConfig: () => config,
+    deviceFingerprint: async () => (await deviceKeyInfo().catch(() => null))?.fingerprint ?? null,
+    session,
+    setStatus,
+    onApproved: () => void refresh(),
+  });
+
   // ----- layout -----
   const header = h(
     'header',
@@ -276,7 +287,7 @@ export function mountApp(root: HTMLElement): void {
     void renderKeyCard();
   }
 
-  root.append(header, status, configForm, trust.card, keyCard, enroll.el, entriesCard, entryView, trust.settings, footer);
+  root.append(header, status, configForm, trust.card, keyCard, enroll.el, entriesCard, inbox.el, entryView, trust.settings, footer);
   render();
   if (tokens.hasToken) void refresh();
 }
