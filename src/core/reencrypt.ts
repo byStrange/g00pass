@@ -1,4 +1,5 @@
 import { readMessage, type PrivateKey, type PublicKey } from 'openpgp';
+import { ADMINS_FILE, ADMINS_SIG } from './admins';
 import { decryptEntry, wipe } from './crypto/decrypt';
 import { encryptToVerified } from './crypto/encrypt';
 import { DecryptError, ReencryptError, throwIfAborted } from './errors';
@@ -50,7 +51,11 @@ export interface ReencryptOptions {
    * governed by `folder` (not inside a nested `.gpg-id` folder).
    */
   replaceEntries?: readonly { path: string; plaintext: Uint8Array }[];
-  /** Additional files for the same commit (e.g. admin metadata). Must not touch entries/.gpg-id. */
+  /**
+   * Additional files for the same commit. Only the folder's own admins file
+   * (`<folder>/.g00pass-admins.json` and its `.sig`, from signAdminsFile) is
+   * allowed; anything else is refused.
+   */
   extraChanges?: readonly FileChange[];
   message?: string;
   /** Entries per chunk between progress callbacks / event-loop yields (default 20). */
@@ -243,10 +248,11 @@ export async function reencryptFolder(
     if (!snapshot.hasFile(kp)) changes.push({ path: kp, content: armored });
   }
   const reserved = new Set(changes.map((c) => normalizePath(c.path)));
+  const allowedExtra = new Set([joinPath(folder, ADMINS_FILE), joinPath(folder, ADMINS_SIG)]);
   for (const c of opts.extraChanges ?? []) {
     const p = normalizePath(c.path);
-    if (reserved.has(p) || p.endsWith('.gpg') || p.endsWith('.gpg-id')) {
-      throw new ReencryptError(`extraChanges may not touch "${p}"`);
+    if (reserved.has(p) || !allowedExtra.has(p) || folder === '') {
+      throw new ReencryptError(`extraChanges may not touch "${p}" (only ${[...allowedExtra].join(' and ')})`);
     }
     reserved.add(p);
     changes.push(c);

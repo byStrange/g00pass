@@ -222,7 +222,19 @@ export async function checkGpgIdSignature(
   return { ok: true, signer: res.signer.fingerprint, created: res.signer.created, children };
 }
 
-/** Best effort: which store key (if any) produced a valid signature? Only for error messages. */
+/** At most this many key files are parsed to name an unauthorized signer (error messages only). */
+export const MAX_SIGNER_CANDIDATES = 4;
+
+/**
+ * Best effort: which store key (if any) produced a valid signature? Only for
+ * error messages. Cost is bounded (a repo writer must not be able to slow the
+ * app down by adding key files): only `.public-keys/<FPR>` files whose name
+ * matches the signature's issuer (fingerprint subpacket, or the v4 key id
+ * suffix / v6 key id prefix of the primary fingerprint) are tried, at most
+ * MAX_SIGNER_CANDIDATES. A signature made by a subkey without an issuer
+ * fingerprint of the primary key is therefore reported as plain
+ * `signature-invalid`.
+ */
 async function identifySigner(
   snapshot: StoreSnapshot,
   content: Uint8Array,
@@ -230,7 +242,13 @@ async function identifySigner(
   now: Date,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  const files = snapshot.listFiles().filter((p) => /^\.public-keys\/[0-9A-F]{40}$|^\.public-keys\/[0-9A-F]{64}$/.test(p)).slice(0, 500);
+  const keyId = parsed.issuerKeyId;
+  const matches = (fpr: string) =>
+    fpr === parsed.issuerFingerprint || (fpr.length === 40 ? fpr.endsWith(keyId) : fpr.startsWith(keyId));
+  const files = snapshot
+    .listFiles()
+    .filter((p) => /^\.public-keys\/(?:[0-9A-F]{40}|[0-9A-F]{64})$/.test(p) && matches(p.slice('.public-keys/'.length)))
+    .slice(0, MAX_SIGNER_CANDIDATES);
   for (const p of files) {
     const fpr = p.slice('.public-keys/'.length);
     const k = await loadKeyByFingerprint(snapshot, fpr, signal);
