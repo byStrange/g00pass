@@ -102,9 +102,12 @@ The policy (`src/core/boundaries.ts`) enforces, on top of the per-folder checks:
    - an undeclared nested `.gpg-id` is adopted only if its own signature
      verifies for its folder ("catch-up" after a gpg bootstrap); otherwise
      the re-sign is refused until it is deleted or signed;
-   - a new boundary (F without `.gpg-id`) must already be declared by its
-     parent (declare, then create), and may not be created above existing
-     nested boundaries.
+   - a new boundary (F without `.gpg-id`) must be declared by its parent:
+     either already (declare, then create) or by the parent's new signature
+     committed in the same commit (`parentDeclaration`, below), and may not
+     be created above existing nested boundaries;
+   - the new signature carries the current `removed@g00pass` declarations
+     forward (below).
 4. **No absorption (core).** `reencryptFolder` refuses if the declared
    children do not match the nested `.gpg-id`s it skips, and refuses any
    governed entry whose PKESK recipient key ids do not include every current
@@ -113,9 +116,44 @@ The policy (`src/core/boundaries.ts`) enforces, on top of the per-folder checks:
    narrower set, e.g. a deleted boundary. Entries with an anonymous recipient
    (`gpg --throw-keyids`) cannot be checked and are let through.
 
-Boundary removal (merging a child back into its parent) is not supported in
-Phase 1: devices that verified the child keep refusing until their derived
-trust state is reset (re-pin or reset the anchors).
+### Creating a sub-folder (`createSubfolder`, one commit)
+
+Parent boundary P (nearest ancestor with a `.gpg-id`), new folder C:
+
+1. P is re-signed over its **unchanged** `.gpg-id`, declaring the expected
+   children plus C (and P's removals carried forward);
+2. C gets its signed `.gpg-id` (escrow merged in);
+3. every entry already under C (governed by P until now) is re-encrypted to
+   C's set; the no-absorption check runs against P's recipients;
+4. P's recipients that are not in C are recorded as removed in C's rotation
+   file (they could read those entries).
+
+The proposed set for C carries `parentDeclaration: { folder: P, signature }`.
+The policy (`parentDeclarationChain`) accepts it only if C has no `.gpg-id`,
+P is C's nearest boundary, the signature verifies over P's current bytes,
+is bound to P, is made by an authorized signer of P, declares exactly
+`expected(P) ∪ {C}` with P's removals, and P's own chain verifies.
+
+### Removing a sub-folder (`removeSubfolder`, one commit)
+
+C is merged into its parent P. Refused when C contains or declares nested
+boundaries, when a declared or device-known boundary below C has vanished,
+or when an entry under C is not encrypted to every current recipient of C
+(it would belong to a narrower, deleted boundary). The commit re-encrypts
+every entry under C to P's verified set, deletes C's `.gpg-id`, `.sig` and
+admins file, and re-signs P without the child and with
+
+```
+removed@g00pass=/infra/prod      one notation per removed former child
+```
+
+A device that verified C before accepts its absence only when P's current
+verified (authorized, not replayed) signature carries `removed@g00pass` for
+it; it then forgets C. Every later re-sign of P carries the declaration
+forward (the policy requires it), so devices that missed the removal commit
+still accept. A `removed@` value must be a strict descendant and may not
+also be declared as a child. Replaying P's pre-removal signature is a
+rollback on devices that saw the removal.
 
 ## Recipient ids
 

@@ -115,7 +115,7 @@ async function currentGoverningKeys(snapshot: StoreSnapshot, folder: string, sig
 }
 
 /** Recipients in `keys` the message is NOT encrypted to (by PKESK key id); null if not checkable (anonymous recipient). */
-async function missingRecipients(ct: Uint8Array, keys: readonly PublicKey[]): Promise<PublicKey[] | null> {
+export async function missingRecipients(ct: Uint8Array, keys: readonly PublicKey[]): Promise<PublicKey[] | null> {
   let ids: string[];
   try {
     const head = new TextDecoder().decode(ct.subarray(0, 64)).trimStart();

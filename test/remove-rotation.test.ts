@@ -3,6 +3,7 @@ import {
   MemoryStore,
   MemoryWriter,
   approveAccessRequest,
+  buildInbox,
   commitMarkRotated,
   emptyRotation,
   folderTrustStatus,
@@ -137,6 +138,10 @@ describe('approval records the member and an admin grant is part of the reviewed
     if (!r.ok) throw new Error(r.message);
     const plan = await previewApproval(s, r.request, A.fpr);
     expect(plan.admins).toEqual({ before: [C.fpr], after: [C.fpr, N.fpr].sort() });
+    // The inbox must plan the same change (else the reviewed digest never matches).
+    const body = await buildBody(N, { folder: 'team', role: 'folder-admin' });
+    const inbox = await buildInbox({ issues: [{ number: 1, title: 't', body, state: 'open', labels: [], author: null, htmlUrl: null, createdAt: null }], snapshot: s, store: { repo: 'acme/secrets', storeRoot: '' }, operatorFingerprint: A.fpr });
+    expect(inbox.actionable[0]!.plan.admins).toEqual(plan.admins);
     // A reader plan (no admin grant) has a different digest: approving it as folder-admin is refused.
     const reader = await parseAccessRequest(await buildBody(N, { folder: 'team', role: 'reader' }), { repo: 'acme/secrets', storeRoot: '' });
     if (!reader.ok) throw new Error(reader.message);

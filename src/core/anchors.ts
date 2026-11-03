@@ -112,6 +112,11 @@ export function pinAnchors(store: StoreRef, fingerprints: readonly string[], sou
   if (anchors.length === 0) throw new G00passError('at least one anchor fingerprint is required');
   const id = idOf(store);
   const prev = getPinnedAnchors(id);
+  // An (unsigned) invite may pin anchors on a fresh device, never replace a
+  // different set: a forged invite must not redirect an existing device's trust.
+  if (source === 'invite' && prev && !sameSet(prev.anchors, anchors)) {
+    throw new G00passError('different global admins are already pinned for this store; reset them first (an invite cannot replace them)');
+  }
   const rec: PinnedAnchors = { anchors, pinnedAt: new Date(trustEnvironment().now()).toISOString(), source };
   updateMap(ANCHORS_STORAGE_KEY, isPinned, (m) => void (m[id] = rec));
   if (!prev || !sameSet(prev.anchors, anchors)) clearDerivedState(id, { seen: true, admins: true });

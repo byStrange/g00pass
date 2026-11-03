@@ -10,7 +10,7 @@ import { withConflictRetry } from '../github/commit';
 import { ESCROW_FLAG, normalizeKeyId } from '../gpgid';
 import { fingerprintOf } from '../keys';
 import { GPG_ID, GPG_ID_SIG, joinPath, normalizePath } from '../paths';
-import { type ReencryptResult, reencryptFolder } from '../reencrypt';
+import { type ReencryptResult, missingRecipients, reencryptFolder } from '../reencrypt';
 import { emptyRotation, readRotation, recordMemberRemoved, rotationKey, rotationPath, serializeRotation } from '../rotation';
 import { signGpgId } from '../signatures';
 import { type CommitResult, type FileChange, type StoreSnapshot, type StoreWriter, listEntries, listGovernedEntries, nestedGpgIdFolders } from '../store';
@@ -198,6 +198,12 @@ export async function planRemoveSubfolder(
   await assertAdminRecipient(snapshot, p, op, 're-sign it');
   if (!(await isFolderRecipient(snapshot, f, op))) throw new SubfolderError('not-recipient', `You are not a recipient of "${f}", so you cannot re-encrypt its entries`);
   const vF = await mustVerify(snapshot, f, opts.signal);
+  // No declared or device-known boundary below C may be missing: its entries
+  // were encrypted to a NARROWER set and must not be merged into P's.
+  const own = await expectedChildBoundaries(snapshot, f, opts.signal);
+  if (!own.ok) throw new SubfolderError('folder-not-verified', `Cannot remove "${f}": ${own.reason}`);
+  if (own.children.length) throw new SubfolderError('invalid-change', `"${f}" declares sub-folders with their own recipients; remove those first`);
+  if (vF.warnings.some((w) => w.startsWith('boundary-vanished:'))) throw new SubfolderError('folder-not-verified', `Cannot remove "${f}": a sub-folder boundary below it was deleted`);
   const vP = await mustVerify(snapshot, p, opts.signal);
   const exp = await expectedChildBoundaries(snapshot, p, opts.signal);
   if (!exp.ok) throw new SubfolderError('folder-not-verified', `Cannot re-sign "${p || '/'}": ${exp.reason}`);
@@ -239,12 +245,23 @@ export async function removeSubfolder(folder: string, opts: SubfolderOptions): P
 
       const changes: FileChange[] = [];
       const failed: string[] = [];
+      const misfits: string[] = [];
+      const vF = await mustVerify(snapshot, plan.folder, opts.signal);
+      const escrow = new Set((await escrowRecipientIds(snapshot, opts.signal)).map(normalizeKeyId));
+      const fKeys = vF.keys.filter((_k, i) => !escrow.has(vF.fingerprints[i]!));
       for (const e of plan.entries) {
         throwIfAborted(opts.signal);
         const ct = await snapshot.readFile(e, opts.signal);
         let plain: Uint8Array | null = null;
         try {
           if (!ct) throw new DecryptError(e);
+          // Every entry must already be readable by all of C's recipients;
+          // otherwise it belongs to a narrower (e.g. deleted) boundary.
+          const missing = await missingRecipients(ct, fKeys);
+          if (missing === null || missing.length) {
+            misfits.push(e);
+            continue;
+          }
           plain = await decryptEntry(ct, [opts.operatorKey], e);
           changes.push({ path: e, content: await encryptToVerified(plain, vP, { armor: opts.armor }) });
         } catch (err) {
@@ -254,6 +271,7 @@ export async function removeSubfolder(folder: string, opts: SubfolderOptions): P
           wipe(plain);
         }
       }
+      if (misfits.length) throw new SubfolderError('folder-not-verified', `Refusing to remove "${plan.folder}": ${misfits.length} entr${misfits.length === 1 ? 'y is' : 'ies are'} not encrypted to every current recipient of it (${misfits.slice(0, 5).join(', ')})`);
       if (failed.length) throw new SubfolderError('decrypt-failed', `Refusing to remove "${plan.folder}": ${failed.length} entr${failed.length === 1 ? 'y' : 'ies'} could not be decrypted with your key (${failed.slice(0, 5).join(', ')})`);
 
       for (const name of [GPG_ID, GPG_ID_SIG, ADMINS_FILE, ADMINS_SIG]) {

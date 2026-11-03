@@ -15,7 +15,15 @@ npm test           # vitest, single worker
 npm run typecheck
 npm run lint
 npm run build      # typecheck + vite build + dist CSP/inline-script check
+npm run e2e        # build + browser end-to-end run (Playwright, in-memory GitHub); screenshots in docs/e2e/
 ```
+
+**Demo store:** `node scripts/seed-demo-store.mjs --out ./demo-store` (or
+`GITHUB_TOKEN=… node scripts/seed-demo-store.mjs --repo you/g00pass-demo-store`
+for an empty private repo; the token is read from the environment only)
+generates demo admin/member/escrow keys, a signed store with nested folders
+and admins files, and prints the setup values. Demo keys and passphrases are
+written in clear to `demo-identities.json`: demo only.
 
 The build version and commit appear in the app header. Set `G00PASS_COMMIT`
 to override the commit (e.g. for reproducible CI builds). Deploy `dist/` at
@@ -39,9 +47,16 @@ every issue in its repo, so do not share the store repo with requesters. If it
 is unset the app falls back to the store repo and shows a warning. Requesters
 need only a fine-grained PAT with *Issues: Read and write* on the requests
 repo; the request token is kept in memory only. Before approving, ask the
-requester for their fingerprint out of band and type its last 8 characters,
+requester for their fingerprint out of band and type its last 16 characters,
 and review the exact before → after recipient list. Folders whose current
 recipient list does not verify cannot be approved.
+
+**Invites, removal, sub-folders:** in *Manage folder*, an admin can invite
+someone (a link with an issues-only token in the URL fragment and the trust
+anchors; a signed invite record is consumed by the approval), remove a member
+(re-encrypts the folder and shows a rotation checklist of every secret they
+could read), and create or remove sub-folders with their own recipients.
+Removing a key never revokes what was already decrypted: rotate the secrets.
 
 **Existing stores (breaking change):** `.gpg-id.sig` must now declare nested
 boundaries with `child@g00pass` notations; re-sign the root and every parent

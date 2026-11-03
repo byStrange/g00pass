@@ -211,18 +211,20 @@ const plan = await planFolderRecipientChange(snapshot, folder, { add: [{ fingerp
 reencryptFolder(folder, plan.lines, {
   snapshot, writer, decryptionKeys: [operatorKey],
   pendingKeys: new Map([[fingerprint, publicKey]]),        // -> .public-keys/<FPR>
-  gpgIdSignature: (text, { children }) => signGpgId(text, folder, operatorKey, { children }), // folder-bound + child boundaries (gpg-id-signatures.md)
-  extraChanges: role === 'folder-admin' ? adminsFileUpdate : [],  // folder-admins.md, signed; the ONLY allowed extraChanges
+  gpgIdSignature: (text, { children, removed }) => signGpgId(text, folder, operatorKey, { children, removed }), // gpg-id-signatures.md
+  extraChanges: [...signedAdminsFile /* role folder-admin: part of the reviewed plan */, ...inviteRecordDeletion],
+  replaceEntries: [rotationFileWithMemberAdded],                // rotation.md
   message: `g00pass: grant ${fingerprint.slice(-16)} ${role} on ${folder} (${requestsRepo}#${n})`,
 });
 ```
 
-**Phase 2, not implemented:** updating the rotation file in the same commit
-(`replaceEntries: [rotationFileWithMemberAdded]`, rotation.md) and deleting
-the invite record (`.g00pass/invites/<id>.json` + `.sig`). Invite records
-are not verified yet, so every approval needs the "no verified invite"
-acknowledgement, and `reencryptFolder` refuses `extraChanges` other than the
-folder's admins file.
+- For `role: folder-admin`, the admins-file change (`plan.admins`, before →
+  after) is part of the plan the approver reviews and of its digest
+  (`approvalChange(request)` is shared by the inbox, preview and commit).
+- The invite is verified on the commit snapshot (`verifyInviteRecord`). A
+  valid record removes the "no verified invite" acknowledgement and is
+  deleted in the same commit (single use; `ApprovalResult.inviteConsumed`).
+  Without a valid record the acknowledgement is required.
 
 After the commit succeeds, update the issue. These steps are best-effort, and
 the commit remains the source of truth:
@@ -238,13 +240,14 @@ The UI then reminds the admin to **revoke the invite token** on GitHub.
 1. Comment with the reason.
 2. Add the label `g00pass:rejected`.
 3. Close with `state_reason: "not_planned"`.
-4. (Phase 2, not implemented) Optionally delete the invite record. No commit
-   to the store is needed otherwise.
+4. No commit to the store is needed. An unused invite record expires on its
+   own (any admin may delete it).
 
 ## Invites
 
-**Status: Phase 2, not implemented** (link handling, invite registry,
-over-scope token probe). The format below is normative for that work.
+**Status: implemented** in `src/core/invites.ts` (`takeInviteFromLocation`,
+`validateInvite`, `issueInvite`, `verifyInviteRecord`, `probeInviteToken`),
+UI in `src/ui/app.ts` (newcomer) and `src/ui/folders.ts` (admin).
 
 An invite is a link the admin sends to the new user through a channel they
 trust (chat, e-mail, in person). It carries a **requester token** and the
@@ -302,7 +305,17 @@ yet, so the delivery channel is the trust root. The newcomer confirms
 4. Show the invite summary and the `anchors` fingerprints. Ask the user to
    confirm the anchors (ideally against what the admin told them). On
    confirmation, pin them with `pinAnchors(repo, anchors, 'invite')` (store-layout.md §Trust anchors).
+   An invite can pin anchors on a device that has none for the store, but
+   **never replace a different pinned set** (`pinAnchors(…, 'invite')`
+   throws): a forged invite must not redirect an existing device's trust.
+   The user resets the anchors in settings first, after confirming with the
+   admin in person.
 5. Continue with key generation and submission.
+
+**Residual:** `replaceState` removes the fragment from the tab's history
+entry, but a browser may still have recorded the original URL in its global
+history. The token is issues-only, expires within 7 days and should be
+revoked after approval; opening invite links in a private window avoids it.
 
 ### Admin client: issuing an invite
 

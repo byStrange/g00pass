@@ -90,7 +90,10 @@ Other cases:
   carries the metadata over **and** counts as exposure to the new folder's
   recipients.
 
-## "Remove member" flow (feature agent 4)
+## "Remove member" flow
+
+**Status: implemented** (`src/core/rotation.ts`, `src/core/access/remove.ts`,
+UI "Manage folder"). Tests: `test/remove-rotation.test.ts`.
 
 Input: folder F and the fingerprint X being removed. X must not be an escrow
 fingerprint, and the operator must be an admin-recipient of F.
@@ -143,6 +146,15 @@ Limits shown to the user:
   that ancestor's entries are not listed.
 - Git history means M keeps the old ciphertext forever. Re-encryption protects
   only future values.
+
+**Not implemented yet:** the best-effort "deleted entries" listing from git
+history, and rotation updates on entry edits (the app has no entry editor
+yet; `recordEntryWrite` + `writeEntry` companions are ready for it).
+
+**Residual risk:** the rotation file is encrypted but not signed. Anyone with
+repo write can encrypt a forged file to the folder's public keys (e.g. marking
+secrets as rotated). It is a reminder list, not an authority: verify
+rotations at the source.
 
 ## Tests the implementation MUST cover
 

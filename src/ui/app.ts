@@ -345,7 +345,7 @@ function mountAppUnguarded(root: HTMLElement, invite: TakenInvite): void {
     const differs = !!pinned && (pinned.anchors.length !== inv.anchors.length || pinned.anchors.some((a) => !inv.anchors.includes(a)));
     const ok = h('input', { type: 'checkbox' });
     const btn = h('button', { type: 'button', class: 'primary', disabled: true }, 'Accept invite');
-    ok.addEventListener('change', () => (btn.disabled = !ok.checked));
+    ok.addEventListener('change', () => (btn.disabled = differs || !ok.checked));
     const card = h(
       'section',
       { class: 'card invite' },
@@ -353,13 +353,15 @@ function mountAppUnguarded(root: HTMLElement, invite: TakenInvite): void {
       h('p', {}, `Store ${inv.repo}${inv.storeRoot ? ` (folder ${inv.storeRoot})` : ''}, branch ${inv.branch}. Access requested for ${inv.folder}/ as ${inv.role}. Requests go to ${inv.requestsRepo}. Expires ${inv.expiresAt}.`),
       h('p', {}, 'The invite names these global admins (trust anchors). Compare EVERY fingerprint with what your admin told you through another channel before accepting: they decide whom this device trusts.'),
       h('ul', { class: 'fprs' }, ...inv.anchors.map((a) => h('li', { class: 'mono' }, formatFingerprint(a)))),
-      differs ? h('p', { class: 'banner danger', role: 'alert' }, 'This device already pinned DIFFERENT global admins for this store. Accepting replaces them. Only continue if your admin confirms the change in person.') : '',
+      differs
+        ? h('p', { class: 'banner danger', role: 'alert' }, 'This device already pinned DIFFERENT global admins for this store. An invite cannot replace them: a forged invite could make this device trust an attacker. If your admin confirms the change in person, reset the pinned global admins (settings below) and open the invite link again.')
+        : '',
       h('label', { class: 'inline' }, ok, 'I compared these fingerprints with my admin and they match.'),
       h('p', { class: 'hint' }, 'The invite token is kept in memory only (this tab) and can only file your access request.'),
       btn,
     );
     btn.addEventListener('click', () => {
-      if (!ok.checked) return;
+      if (!ok.checked || differs) return;
       pinAnchors(store, inv.anchors, 'invite');
       config = { owner, repo, branch: inv.branch, storeRoot: inv.storeRoot, requestsRepo: inv.requestsRepo };
       localStorage.setItem(CONFIG_KEY, JSON.stringify(config));

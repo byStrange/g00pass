@@ -248,8 +248,8 @@ example (rotation.md).
 ## Recipient changes — `src/core/access/recipients.ts`, `approve.ts`
 
 ```ts
-planFolderRecipientChange(snapshot, folder, { add?, remove? }, { operatorFingerprint })
-  : Promise<RecipientChangePlan>   // { folder, before, after, added, removed, droppedEscrow, childBoundaries, digest, warnings }
+planFolderRecipientChange(snapshot, folder, { add?, remove?, admins?: { add?, remove? } }, { operatorFingerprint })
+  : Promise<RecipientChangePlan>   // { folder, before, after, added, removed, droppedEscrow, childBoundaries, admins, resign, digest, warnings }
 changeFolderRecipients(folder, change, { snapshot, writer, operatorKey, approvedPlanDigest, ... }): Promise<ReencryptResult>
 previewApproval(snapshot, request, operatorFpr): Promise<RecipientChangePlan>
 approveAccessRequest(request, { ..., confirmation: { fingerprintSuffix, acknowledgeUninvited?, approvedPlan } })
@@ -258,8 +258,25 @@ RecipientChangeError.code: 'invalid-change' | 'not-recipient' | 'folder-not-veri
 
 The plan requires the folder's CURRENT `.gpg-id` to verify (tolerating only
 `escrow-missing`), drops retired escrow lines, and is bound to a digest over
-`{folder, before, after, childBoundaries}`; `changeFolderRecipients`
-recomputes it on its snapshot and refuses a different digest.
+`{folder, before, after, childBoundaries, admins, resign}`;
+`changeFolderRecipients` recomputes it on its snapshot and refuses a
+different digest. A removed recipient listed in the folder's admins file is
+removed from it too; nested `.gpg-id` / admins files signed by an admin who
+loses rights are re-signed by the operator in the same commit (`resign`).
+`changeFolderRecipients({ rotation })` updates the rotation file in the
+same commit.
+
+Phase 2 (`access/remove.ts`, `access/subfolders.ts`, `rotation.ts`, `invites.ts`):
+
+```ts
+previewRemoval(snapshot, folder, member, operatorFpr): Promise<RecipientChangePlan>
+removeMember(folder, member, { loadSnapshot, writer, operatorKey, approvedPlanDigest }): Promise<ReencryptResult>
+memberAccessElsewhere(snapshot, member, exceptFolder): Promise<{ folder, recipient, admin }[]>
+planCreateSubfolder(snapshot, folder, recipients, { operatorFingerprint }) / createSubfolder(folder, recipients, opts)
+planRemoveSubfolder(snapshot, folder, { operatorFingerprint }) / removeSubfolder(folder, opts)
+readRotation / rotationChecklist / commitMarkRotated / record* helpers   // rotation.md
+takeInviteFromLocation / validateInvite / issueInvite / verifyInviteRecord / probeInviteToken   // access-requests.md
+```
 
 ## Folder re-encrypt — `src/core/reencrypt.ts`
 

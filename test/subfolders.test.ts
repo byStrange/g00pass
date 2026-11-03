@@ -164,4 +164,20 @@ describe('remove sub-folder (explicit signed removal)', () => {
     expect(await code(removeSubfolder('infra/prod', opts(s, 'sha256:' + '0'.repeat(64))))).toBe('plan-changed');
     expect(plan.digest).toMatch(/^sha256:/);
   });
+
+  it('phase-2 review: never merges a deleted grandchild boundary or entries narrower than the folder', async () => {
+    // infra/prod declared infra/prod/deep (A only); an attacker deletes deep/.gpg-id(.sig).
+    const base = await store('r4');
+    for (const [p, c] of Object.entries(await signedGpgId('infra/prod', txt(A, C), A.priv, { children: ['infra/prod/deep'] }))) base.set(p, c);
+    for (const [p, c] of Object.entries(await signedGpgId('infra/prod/deep', txt(A), A.priv))) base.set(p, c);
+    base.set('infra/prod/deep/k.gpg', await encryptForTest('deep-only', [A, E]));
+    const s = await derive(base, { 'infra/prod/deep/.gpg-id': null, 'infra/prod/deep/.gpg-id.sig': null });
+    expect(await code(planRemoveSubfolder(s, 'infra/prod', { operatorFingerprint: A.fpr }))).toBe('folder-not-verified');
+    // An entry under prod that C cannot read (narrower than prod's recipients) is not merged either.
+    const t = await store('r5');
+    t.set('infra/prod/narrow.gpg', await encryptForTest('narrow', [A, E]));
+    const plan = await planRemoveSubfolder(t, 'infra/prod', { operatorFingerprint: A.fpr });
+    expect(await code(removeSubfolder('infra/prod', opts(t, plan.digest)))).toBe('folder-not-verified');
+    expect(t.hasFile('infra/prod/.gpg-id')).toBe(true);
+  });
 });

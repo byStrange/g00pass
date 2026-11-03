@@ -168,4 +168,10 @@ describe('invites: link, registry, approval', () => {
     expect(await probeInviteToken(client, repo)).toMatchObject({ ok: false, reason: expect.stringContaining('over-scoped') });
     expect(await probeInviteToken(client, { ...repo, requestsRepo: 'acme/nope' })).toMatchObject({ ok: false });
   });
+
+  it('an invite never replaces a different pinned anchor set (phase-2 review)', () => {
+    expect(() => pinAnchors(STORE_ID, [M.fpr], 'invite')).toThrow(/already pinned/);
+    expect(() => pinAnchors(STORE_ID, [A.fpr], 'invite')).not.toThrow();
+    expect(() => pinAnchors('acme/other|', [M.fpr], 'invite')).not.toThrow();
+  });
 });

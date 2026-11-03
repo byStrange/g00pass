@@ -85,8 +85,8 @@ AAAABBBBCCCCDDDDEEEEFFFF0000111122223333
   3. Manually, from settings (`'manual'`, "Pin global admins manually":
      paste full fingerprints, confirm the source, confirm the list). Settings
      also show the pinned set and can reset it (`resetAnchors`).
-     Pinning from an invite link (1.) is Phase 2 (invites are not
-     implemented yet).
+     An invite (1.) may only pin on a device without anchors for the store
+     (or the identical set); it never replaces a different set.
 
   Pinning a different set, or resetting, clears the device's derived state
   for the store: the replay high-water marks, the admins cache and the

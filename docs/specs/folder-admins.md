@@ -131,6 +131,15 @@ A device with no cache walks the history once and then caches the result.
 
 ### Residual risk
 
+- **Merges (fixed).** `commits?path=` uses git's history simplification: at
+  a merge that is TREESAME to one parent for the file, the other parents are
+  pruned, so a writer could hide the version that removed them (or a newer
+  one) behind a merge **without** force-pushing. The verifier therefore lists
+  the merges in oldest-listed-version..head (`FileHistory.merges`, the compare
+  API) and requires every merge parent's file content to be a version the
+  listing shows ("absent" too, when the listing reaches the file's
+  creation). Otherwise the file is invalid. More than 1000 commits or 50
+  merges in that range: unverifiable, fail closed (a global admin re-signs).
 - **History rewrite.** A writer who can force-push (no branch protection) can
   remove the legitimate newer version from history. A fresh device then
   accepts a sibling or an older version signed by the removed admin's
