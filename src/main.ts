@@ -1,10 +1,11 @@
 import './ui/styles.css';
-import { lockTrustHook, passThroughTrustHook, setTrustHook } from './core';
+import { lockTrustHook, setTrustHook, signatureTrustHook } from './core';
 import { mountApp } from './ui/app';
 
-// TODO(trust): install the .gpg-id signature-verifying hook here once
-// implemented (docs/specs/gpg-id-signatures.md).
-setTrustHook(passThroughTrustHook);
+// Trust policy: .gpg-id signatures + pinned anchors + folder admins
+// (docs/specs/gpg-id-signatures.md). Locking also freezes the trust
+// environment (storage, store identity, history, clock).
+setTrustHook(signatureTrustHook);
 lockTrustHook();
 
 mountApp(document.getElementById('app') as HTMLElement);

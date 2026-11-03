@@ -14,6 +14,7 @@ import {
 import { h, clear } from './dom';
 import { deviceKeyInfo, forgetDeviceKey, loadDeviceKeyArmored, saveDeviceKey } from './keystore';
 import { Session, copyWithAutoClear } from './session';
+import { createTrustPanel } from './trust';
 
 const CONFIG_KEY = 'g00pass.repo-config.v1';
 const IDLE_LOCK_MS = 5 * 60_000;
@@ -44,6 +45,7 @@ export function mountApp(root: HTMLElement): void {
     status.classList.toggle('error', isError);
   };
 
+  const trust = createTrustPanel({ setStatus });
   const entryView = h('section', { class: 'card entry', hidden: true });
   const clearEntryView = () => {
     clear(entryView);
@@ -187,8 +189,10 @@ export function mountApp(root: HTMLElement): void {
       snapshot = await GitHubSnapshot.load(client, config);
       setStatus(`Loaded ${listEntries(snapshot).filter((e) => !isHiddenEntry(e)).length} entries at ${snapshot.commitSha.slice(0, 7)}.`);
       renderList();
+      await trust.refresh(snapshot, config).catch(() => setStatus('Could not evaluate recipient trust; treat this store as unverified.', true));
     } catch (e) {
       snapshot = null;
+      void trust.refresh(null, config);
       setStatus(errMsg(e), true);
     }
   }
@@ -233,6 +237,8 @@ export function mountApp(root: HTMLElement): void {
         ),
       );
       if (rest) entryView.append(details);
+      const st = await trust.entryStatus(snapshot, path).catch(() => null);
+      if (st) entryView.append(st);
       entryView.hidden = false;
     } catch (e) {
       setStatus(errMsg(e), true);
@@ -248,13 +254,13 @@ export function mountApp(root: HTMLElement): void {
     h('h1', {}, 'g00pass'),
     h('span', { class: 'version', title: 'Build version and commit' }, `v${__APP_VERSION__} · ${__APP_COMMIT__}`),
   );
-  const footer = h('footer', {}, `Trust policy: ${getTrustHook().name}. Read-only client; nothing leaves this browser except GitHub API calls.`);
+  const footer = h('footer', {}, `Trust policy: ${getTrustHook().name} (recipient lists verified per folder, see Recipient trust). Read-only client; nothing leaves this browser except GitHub API calls.`);
 
   function render() {
     void renderKeyCard();
   }
 
-  root.append(header, status, configForm, keyCard, entriesCard, entryView, footer);
+  root.append(header, status, configForm, trust.card, keyCard, entriesCard, entryView, trust.settings, footer);
   render();
   if (tokens.hasToken) void refresh();
 }
