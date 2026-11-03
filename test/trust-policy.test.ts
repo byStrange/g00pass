@@ -45,6 +45,11 @@ let env: EnvHandle;
 const rootText = () => `${A.fpr}\n${B.fpr}\n${E.fpr} # g00pass:escrow\n`;
 const infraText = (...ids: TestIdentity[]) => ids.map((i) => i.fpr).join('\n') + `\n${E.fpr} # g00pass:escrow\n`;
 
+/** Fixture signatures declare the fixture's boundaries: root -> infra -> infra/prod. */
+const CHILDREN: Record<string, string[]> = { '': ['infra'], infra: ['infra/prod'] };
+const sgi = (folder: string, text: string, signer: openpgp.PrivateKey, date?: Date, children = CHILDREN[folder] ?? []) =>
+  signedGpgId(folder, text, signer, { date, children });
+
 async function write(store: MemoryStore, entry: string) {
   return writeEntry({ snapshot: store, writer: new MemoryWriter(store), entry, plaintext: enc('s3cret') });
 }
@@ -61,11 +66,11 @@ beforeAll(async () => {
   freshEnv();
   const keys: Record<string, string> = {};
   for (const i of [A, B, C, D, M, E]) keys[`.public-keys/${i.fpr}`] = i.armoredPublic;
-  const s0 = new MemoryStore({ ...keys, ...(await signedGpgId('', rootText(), A.priv)) }, 'c-base0');
+  const s0 = new MemoryStore({ ...keys, ...(await sgi('', rootText(), A.priv)) }, 'c-base0');
   base = await derive(s0, {
     ...(await adminsFiles(s0, 'infra', [C.fpr], A.priv)),
-    ...(await signedGpgId('infra', infraText(A, C, D), C.priv)),
-    ...(await signedGpgId('infra/prod', infraText(C), C.priv)),
+    ...(await sgi('infra', infraText(A, C, D), C.priv)),
+    ...(await sgi('infra/prod', infraText(C), C.priv)),
     'infra/db.gpg': await encryptForTest('db-pw', [A, C, D, E]),
   });
 });
@@ -134,14 +139,14 @@ describe('threat: attacker with repo write edits a folder .gpg-id', () => {
   });
 
   it('adds own key and signs with own key -> unknown-signer', async () => {
-    const s = await derive(base, await signedGpgId('infra', infraText(A, C, D, M), M.priv));
+    const s = await derive(base, await sgi('infra', infraText(A, C, D, M), M.priv));
     const st = await folderTrustStatus(s, 'infra');
     expect(st).toMatchObject({ verified: false, code: 'unknown-signer' });
     expect(st.reason).toContain(M.fpr);
   });
 
   it('signature by a non-admin recipient -> unknown-signer', async () => {
-    const s = await derive(base, await signedGpgId('infra', infraText(A, C, D, M), D.priv));
+    const s = await derive(base, await sgi('infra', infraText(A, C, D, M), D.priv));
     expect(await code(write(s, 'infra/x'))).toBe('unknown-signer');
   });
 
@@ -157,7 +162,7 @@ describe('threat: attacker with repo write edits a folder .gpg-id', () => {
   });
 
   it('escrow recipient removed (even by a real admin) -> escrow-missing', async () => {
-    const s = await derive(base, await signedGpgId('infra', `${A.fpr}\n${C.fpr}\n`, C.priv));
+    const s = await derive(base, await sgi('infra', `${A.fpr}\n${C.fpr}\n`, C.priv));
     expect(await code(write(s, 'infra/x'))).toBe('escrow-missing');
   });
 
@@ -166,7 +171,7 @@ describe('threat: attacker with repo write edits a folder .gpg-id', () => {
     for (const id of [longId, D.email]) {
       const s = await derive(base, {
         [`.public-keys/${id}`]: D.armoredPublic, // resolvable, but the signed id is still weak
-        ...(await signedGpgId('infra', `${C.fpr}\n${id}\n${E.fpr} # g00pass:escrow\n`, C.priv)),
+        ...(await sgi('infra', `${C.fpr}\n${id}\n${E.fpr} # g00pass:escrow\n`, C.priv)),
       });
       expect(await code(write(s, 'infra/x'))).toBe('weak-recipient');
     }
@@ -180,13 +185,13 @@ describe('threat: attacker with repo write edits a folder .gpg-id', () => {
   it('signer key file swapped (attacker key under the admin’s fingerprint) -> refused', async () => {
     const s = await derive(base, {
       [`.public-keys/${C.fpr}`]: M.armoredPublic,
-      ...(await signedGpgId('infra/prod', infraText(M), M.priv)),
+      ...(await sgi('infra/prod', infraText(M), M.priv)),
     });
     expect(await code(write(s, 'infra/prod/x'))).not.toBe('ok');
   });
 
   it('escrow key may not sign', async () => {
-    const s = await derive(base, await signedGpgId('infra', infraText(A, C, M), E.priv));
+    const s = await derive(base, await sgi('infra', infraText(A, C, M), E.priv));
     expect(await code(write(s, 'infra/x'))).toBe('unknown-signer');
   });
 });
@@ -194,8 +199,8 @@ describe('threat: attacker with repo write edits a folder .gpg-id', () => {
 describe('threat: replay of an old .gpg-id + .gpg-id.sig (same folder)', () => {
   it('rejected on a device that has seen the newer version; accepted on a fresh device (documented limit)', async () => {
     const hourAgo = new Date(Date.now() - 3600_000);
-    const old = await derive(base, await signedGpgId('infra', infraText(A, C, D), C.priv, hourAgo));
-    const now = await derive(base, await signedGpgId('infra', infraText(A, C), C.priv));
+    const old = await derive(base, await sgi('infra', infraText(A, C, D), C.priv, hourAgo));
+    const now = await derive(base, await sgi('infra', infraText(A, C), C.priv));
     expect((await folderTrustStatus(now, 'infra')).verified).toBe(true);
     expect(await folderTrustStatus(old, 'infra')).toMatchObject({ verified: false, code: 'replayed' });
 
@@ -215,7 +220,7 @@ describe('threat: signer key state', () => {
     const s0 = await derive(base, { [`.public-keys/${X}`]: publicKey.armor() });
     const s = await derive(s0, {
       ...(await adminsFiles(s0, 'infra', [C.fpr, X], A.priv)),
-      ...(await signedGpgId('infra', infraText(A, C), privateKey, new Date(past.getTime() + 3600_000))),
+      ...(await sgi('infra', infraText(A, C), privateKey, new Date(past.getTime() + 3600_000))),
     });
     expect(await isVerifiedFolderAdmin(s, 'infra', X)).toBe(true);
     expect(await code(write(s, 'infra/x'))).toBe('signature-invalid');
@@ -226,7 +231,7 @@ describe('threat: signer key state', () => {
     const s0 = await derive(base, { [`.public-keys/${R.fpr}`]: R.armoredPublic });
     const s1 = await derive(s0, {
       ...(await adminsFiles(s0, 'infra', [C.fpr, R.fpr], A.priv)),
-      ...(await signedGpgId('infra', infraText(A, C), R.priv)),
+      ...(await sgi('infra', infraText(A, C), R.priv)),
     });
     expect((await folderTrustStatus(s1, 'infra')).verified).toBe(true);
     const { publicKey: revoked } = await openpgp.revokeKey({ key: R.priv, format: 'armored' });
@@ -242,7 +247,7 @@ describe('threat: signer key state', () => {
     });
     const S = privateKey.getFingerprint().toUpperCase();
     const s0 = await derive(base, { [`.public-keys/${S}`]: privateKey.toPublic().armor() });
-    const files = await signedGpgId('infra', infraText(A, C), privateKey);
+    const files = await sgi('infra', infraText(A, C), privateKey);
     const parsed = await parseDetachedSignature(files['infra/.gpg-id.sig'] as Uint8Array);
     expect(privateKey.getSubkeys().map((k) => k.getKeyID().toHex().toUpperCase())).toContain(parsed.issuerKeyId);
     const s = await derive(s0, { ...(await adminsFiles(s0, 'infra', [C.fpr, S], A.priv)), ...files });
@@ -250,7 +255,7 @@ describe('threat: signer key state', () => {
   });
 
   it('future-dated signature (> 5 min) -> refused', async () => {
-    const s = await derive(base, await signedGpgId('infra', infraText(A, C), C.priv, new Date(Date.now() + 3600_000)));
+    const s = await derive(base, await sgi('infra', infraText(A, C), C.priv, new Date(Date.now() + 3600_000)));
     expect(await code(write(s, 'infra/x'))).toBe('signature-invalid');
   });
 });
@@ -301,7 +306,7 @@ describe('signature format', () => {
       {
         [`.public-keys/${A.fpr}`]: A.armoredPublic,
         [`.public-keys/${GPG}`]: fx('public-key.asc'),
-        ...(await signedGpgId('', `${A.fpr}\n`, A.priv)),
+        ...(await sgi('', `${A.fpr}\n`, A.priv, undefined, ['ops'])),
         'ops/.gpg-id': fx('ops.gpg-id'),
         'ops/.gpg-id.sig': fx('ops.gpg-id.sig'),
       },
@@ -327,7 +332,7 @@ describe('root .gpg-id vs pinned anchors', () => {
   });
 
   it('root self-signed by the attacker -> anchor-mismatch', async () => {
-    const s = await derive(base, await signedGpgId('', `${M.fpr}\n${E.fpr} # g00pass:escrow\n`, M.priv));
+    const s = await derive(base, await sgi('', `${M.fpr}\n${E.fpr} # g00pass:escrow\n`, M.priv));
     expect(await code(write(s, 'infra/x'))).toBe('anchor-mismatch');
   });
 
@@ -337,30 +342,30 @@ describe('root .gpg-id vs pinned anchors', () => {
   });
 
   it('root signed by a non-anchor (folder admin) -> refused', async () => {
-    const s = await derive(base, await signedGpgId('', rootText(), C.priv));
+    const s = await derive(base, await sgi('', rootText(), C.priv));
     expect(await code(write(s, 'top'))).toBe('unknown-signer');
   });
 
   it('pinned escrow fingerprint still cannot sign the root', async () => {
     pinAnchors(STORE_ID, [A.fpr, B.fpr, E.fpr], 'manual');
-    const s = await derive(base, await signedGpgId('', `${A.fpr}\n${B.fpr}\n${E.fpr} # g00pass:escrow\n`, E.priv));
+    const s = await derive(base, await sgi('', `${A.fpr}\n${B.fpr}\n${E.fpr} # g00pass:escrow\n`, E.priv));
     expect(await code(write(s, 'top'))).not.toBe('ok');
   });
 
   it('anchor rollover: a validly signed change re-pins; removed anchors lose authority', async () => {
-    const s = await derive(base, await signedGpgId('', `${A.fpr}\n${C.fpr}\n${E.fpr} # g00pass:escrow\n`, A.priv));
+    const s = await derive(base, await sgi('', `${A.fpr}\n${C.fpr}\n${E.fpr} # g00pass:escrow\n`, A.priv));
     const r = await evaluateRootTrust(s);
     expect(r).toMatchObject({ ok: true, rolledOver: true, signer: A.fpr });
     expect(getPinnedAnchors(STORE_ID)?.anchors).toEqual([A.fpr, C.fpr].sort());
     expect(getPinnedAnchors(STORE_ID)?.source).toBe('rollover');
     expect(await isVerifiedFolderAdmin(s, 'infra', B.fpr)).toBe(false);
     // B re-signing the same list is now refused
-    const s2 = await derive(s, await signedGpgId('', `${A.fpr}\n${C.fpr}\n${E.fpr} # g00pass:escrow\n`, B.priv));
+    const s2 = await derive(s, await sgi('', `${A.fpr}\n${C.fpr}\n${E.fpr} # g00pass:escrow\n`, B.priv));
     expect(await code(write(s2, 'top'))).toBe('unknown-signer');
   });
 
   it('anchor may sign themselves out; the rolled-over root stays trusted', async () => {
-    const s = await derive(base, await signedGpgId('', `${B.fpr}\n${E.fpr} # g00pass:escrow\n`, A.priv));
+    const s = await derive(base, await sgi('', `${B.fpr}\n${E.fpr} # g00pass:escrow\n`, A.priv));
     expect((await evaluateRootTrust(s)).ok).toBe(true);
     expect((await evaluateRootTrust(s)).ok).toBe(true);
     expect(getPinnedAnchors(STORE_ID)?.anchors).toEqual([B.fpr]);
@@ -369,9 +374,9 @@ describe('root .gpg-id vs pinned anchors', () => {
 
   it('replayed old root after a rollover is rejected', async () => {
     const hourAgo = new Date(Date.now() - 3600_000);
-    const s0 = await derive(base, await signedGpgId('', rootText(), A.priv, hourAgo));
+    const s0 = await derive(base, await sgi('', rootText(), A.priv, hourAgo));
     expect((await evaluateRootTrust(s0)).ok).toBe(true);
-    const s1 = await derive(base, await signedGpgId('', `${A.fpr}\n${E.fpr} # g00pass:escrow\n`, A.priv));
+    const s1 = await derive(base, await sgi('', `${A.fpr}\n${E.fpr} # g00pass:escrow\n`, A.priv));
     expect((await evaluateRootTrust(s1)).ok).toBe(true);
     expect(getPinnedAnchors(STORE_ID)?.anchors).toEqual([A.fpr]);
     expect(await evaluateRootTrust(s0)).toMatchObject({ ok: false, code: 'replayed' }); // older root signature
@@ -434,7 +439,7 @@ describe('folder admins file (folder-admins.md tests)', () => {
     const tampered = bytes.replace(`"${C.fpr}"`, `"${C.fpr}",\n    "${M.fpr}"`);
     const s = await derive(base, {
       'infra/.g00pass-admins.json': tampered,
-      ...(await signedGpgId('infra', infraText(A, C, D, M), M.priv)),
+      ...(await sgi('infra', infraText(A, C, D, M), M.priv)),
     });
     expect(await verifyAdminsFile(s, 'infra')).toMatchObject({ status: 'invalid' });
     expect(await isVerifiedFolderAdmin(s, 'infra', M.fpr)).toBe(false);
@@ -460,7 +465,7 @@ describe('folder admins file (folder-admins.md tests)', () => {
     const s = await derive(base, {
       ...(await adminsFiles(base, 'infra/prod', [D.fpr], C.priv)),
     });
-    const s2 = await derive(s, await signedGpgId('infra/prod', infraText(C, D), D.priv));
+    const s2 = await derive(s, await sgi('infra/prod', infraText(C, D), D.priv));
     expect(await verifyAdminsFile(s2, 'infra/prod')).toMatchObject({ status: 'valid', via: 'ancestor-admin' });
     expect((await folderTrustStatus(s2, 'infra/prod')).verified).toBe(true);
     expect(await isVerifiedFolderAdmin(s2, 'infra', D.fpr)).toBe(false); // delegation flows down only
@@ -501,7 +506,7 @@ describe('proposed recipients (approve / remove / re-encrypt)', () => {
       snapshot: s,
       writer: w,
       decryptionKeys: [C.priv],
-      gpgIdSignature: signer ? (t) => signGpgId(t, sigFolder, signer.priv) : undefined,
+      gpgIdSignature: signer ? (t, c) => signGpgId(t, sigFolder, signer.priv, { children: sigFolder === folder ? c.children : [] }) : undefined,
       ...extra,
     });
     return { r, w };
@@ -539,7 +544,7 @@ describe('proposed recipients (approve / remove / re-encrypt)', () => {
 
   it('root changes need an anchor', async () => {
     const s = await derive(base, {});
-    const sig = (k: TestIdentity) => async (t: string) => signGpgId(t, '', k.priv);
+    const sig = (k: TestIdentity) => async (t: string, c: { children: readonly string[] }) => signGpgId(t, '', k.priv, { children: c.children });
     expect(await code(verifyProposedRecipients(s, '', [A.fpr, C.fpr], { signature: sig(C) }))).toBe('unknown-signer');
     const ok = await verifyProposedRecipients(s, '', [A.fpr, B.fpr, C.fpr], { signature: sig(B) });
     expect(ok.verified.fingerprints).toContain(E.fpr);
@@ -547,7 +552,7 @@ describe('proposed recipients (approve / remove / re-encrypt)', () => {
 
   it('the verified set is bound to the snapshot it was verified on', async () => {
     const s = await derive(base, {});
-    const p = await verifyProposedRecipients(s, 'infra', [C.fpr], { signature: (t) => signGpgId(t, 'infra', C.priv) });
+    const p = await verifyProposedRecipients(s, 'infra', [C.fpr], { signature: (t, c) => signGpgId(t, 'infra', C.priv, { children: c.children }) });
     expect(p.verified.snapshotSha).toBe(s.commitSha);
   });
 });

@@ -11,8 +11,8 @@ import {
   serializeGpgId,
 } from './gpgid';
 import { type ResolvedRecipient, resolveRecipient, resolveRecipients } from './keys';
-import { GPG_ID, GPG_ID_SIG, joinPath, normalizePath } from './paths';
-import type { StoreSnapshot } from './store';
+import { GPG_ID, GPG_ID_SIG, dirname, entryFile, joinPath, normalizePath } from './paths';
+import { type StoreSnapshot, directNestedGpgIdFolders } from './store';
 
 /**
  * TRUST CHOKE-POINT.
@@ -34,6 +34,17 @@ export interface RecipientVerificationRequest {
   /** Folder whose `.gpg-id` governs the encryption ("" = store root). */
   readonly folder: string;
   readonly gpgIdPath: string;
+  /**
+   * Folder the write lands in (the entry's directory, or the folder being
+   * re-encrypted). Inside `folder`; differs from it when `folder` governs by
+   * nearest-wins. Lets the policy refuse writes into a vanished boundary.
+   */
+  readonly target: string;
+  /**
+   * Proposed sets: the direct child boundaries the new signature declares
+   * (from the hook's `childBoundaries`, or file presence). Null for committed sets.
+   */
+  readonly childBoundaries: readonly string[] | null;
   /** Exact `.gpg-id` bytes (current, or the proposed new content). */
   readonly gpgIdContent: Uint8Array;
   /** Bytes of the detached signature `.gpg-id.sig` (current or proposed), if any. */
@@ -49,9 +60,19 @@ export type TrustDecision =
   | { ok: true; warnings?: readonly string[] }
   | { ok: false; code: TrustErrorCode; reason: string };
 
+export type ChildBoundaryDecision =
+  | { ok: true; children: readonly string[] }
+  | { ok: false; code: TrustErrorCode; reason: string };
+
 export interface TrustHook {
   readonly name: string;
   verify(req: RecipientVerificationRequest): Promise<TrustDecision>;
+  /**
+   * Optional: the direct child boundaries a NEW signature of `folder` must
+   * declare (asked before signing a proposed set). Without it the core uses
+   * the nested `.gpg-id` folders present in the snapshot.
+   */
+  childBoundaries?(snapshot: StoreSnapshot, folder: string, signal?: AbortSignal): Promise<ChildBoundaryDecision>;
 }
 
 /**
@@ -105,6 +126,8 @@ export interface VerifiedRecipientSet {
   readonly keys: readonly PublicKey[];
   readonly snapshotSha: string;
   readonly proposed: boolean;
+  /** Proposed sets: the child boundaries the verified signature declares (re-encrypt must not cross them). */
+  readonly childBoundaries: readonly string[] | null;
   readonly warnings: readonly string[];
   readonly hook: string;
 }
@@ -134,6 +157,7 @@ async function runHook(req: RecipientVerificationRequest, extraWarnings: string[
     keys: Object.freeze(req.recipients.map((r) => r.key)),
     snapshotSha: req.snapshot.commitSha,
     proposed: req.proposed,
+    childBoundaries: req.childBoundaries ? Object.freeze([...req.childBoundaries]) : null,
     warnings: Object.freeze([...extraWarnings, ...(decision.warnings ?? [])]),
     hook: installedHook.name,
   });
@@ -171,6 +195,7 @@ export async function verifyRecipients(
 ): Promise<VerifiedRecipientSet> {
   const has = (p: string) => snapshot.hasFile(p);
   const gpgIdPath = 'entry' in target ? findGpgIdForEntry(has, target.entry) : findGpgIdForFolder(has, target.folder);
+  const where = 'entry' in target ? dirname(entryFile(target.entry)) : normalizePath(target.folder);
   const folder = gpgIdFolder(gpgIdPath);
   const content = await snapshot.readFile(gpgIdPath, opts.signal);
   if (!content) throw new TrustError(folder, `${gpgIdPath} disappeared from snapshot`);
@@ -184,7 +209,7 @@ export async function verifyRecipients(
   if (escrow.some((f) => !have.has(f))) warnings.push('escrow-missing');
 
   return runHook(
-    { folder, gpgIdPath, gpgIdContent: content, gpgIdSignature: sig, proposed: false, recipients, snapshot },
+    { folder, gpgIdPath, target: where, childBoundaries: null, gpgIdContent: content, gpgIdSignature: sig, proposed: false, recipients, snapshot },
     warnings,
   );
 }
@@ -199,10 +224,15 @@ export interface ProposedRecipients {
   gpgIdSignature: Uint8Array | null;
 }
 
+/** Signer callback: receives the exact final `.gpg-id` text and the child boundaries to declare. */
+export type GpgIdSigner = (gpgIdText: string, ctx: { folder: string; children: readonly string[] }) => Promise<Uint8Array>;
+
 /**
  * Verify a NEW recipient list for `folder` (approve / remove member /
  * re-encrypt). Escrow recipients from the root `.gpg-id` are always merged in
  * (flagged), so callers cannot accidentally drop the recovery key.
+ * The child boundaries the new signature must declare come from the hook
+ * (`childBoundaries`), and are passed to the signer callback.
  */
 export async function verifyProposedRecipients(
   snapshot: StoreSnapshot,
@@ -213,9 +243,10 @@ export async function verifyProposedRecipients(
     pending?: ReadonlyMap<string, string>;
     /**
      * Detached signature for the new `.gpg-id`, or a signer that receives the
-     * exact final gpgIdText (after escrow merge) and returns signature bytes.
+     * exact final gpgIdText (after escrow merge) plus the child boundaries to
+     * declare, and returns signature bytes.
      */
-    signature?: Uint8Array | null | ((gpgIdText: string) => Promise<Uint8Array>);
+    signature?: Uint8Array | null | GpgIdSigner;
     signal?: AbortSignal;
   } = {},
 ): Promise<ProposedRecipients> {
@@ -230,13 +261,32 @@ export async function verifyProposedRecipients(
   const have = new Set(recipients.map((r) => r.fingerprint));
   if (escrow.some((fp) => !have.has(fp))) throw new TrustError(f, 'escrow recipient missing', 'escrow-missing');
 
+  let children: readonly string[];
+  if (installedHook.childBoundaries) {
+    let cb: ChildBoundaryDecision;
+    try {
+      cb = await installedHook.childBoundaries(snapshot, f, opts.signal);
+    } catch (e) {
+      throw new TrustError(f, `trust hook "${installedHook.name}" failed: ${(e as Error)?.message ?? 'error'}`);
+    }
+    if (!cb || cb.ok !== true) {
+      const d = cb as { code?: TrustErrorCode; reason?: string } | undefined;
+      throw new TrustError(f, d?.reason ?? 'child boundaries rejected by trust hook', d?.code ?? 'untrusted');
+    }
+    children = [...cb.children];
+  } else {
+    children = directNestedGpgIdFolders(snapshot, f);
+  }
+
   const signature =
-    typeof opts.signature === 'function' ? await opts.signature(gpgIdText) : (opts.signature ?? null);
+    typeof opts.signature === 'function' ? await opts.signature(gpgIdText, { folder: f, children }) : (opts.signature ?? null);
 
   const verified = await runHook(
     {
       folder: f,
       gpgIdPath,
+      target: f,
+      childBoundaries: children,
       gpgIdContent: new TextEncoder().encode(gpgIdText),
       gpgIdSignature: signature,
       proposed: true,

@@ -11,7 +11,7 @@ import {
 } from 'openpgp';
 import { G00passError } from './errors';
 import { fingerprintOf, parsePublicKey } from './keys';
-import { PUBLIC_KEYS_DIR, joinPath, normalizePath } from './paths';
+import { PUBLIC_KEYS_DIR, isWithin, joinPath, normalizePath } from './paths';
 import type { StoreSnapshot } from './store';
 
 /**
@@ -26,6 +26,13 @@ import type { StoreSnapshot } from './store';
  */
 
 export const FOLDER_NOTATION = 'folder@g00pass';
+/**
+ * Child-boundary declaration (gpg-id-signatures.md §Child boundaries): one
+ * hashed notation `child@g00pass=/<child folder>` per DIRECT nested folder
+ * that has its own `.gpg-id`. Makes the set of trust boundaries part of the
+ * signed state, so deleting a nested `.gpg-id` cannot silently widen access.
+ */
+export const CHILD_NOTATION = 'child@g00pass';
 /** Allowed clock skew for signature creation times in the future. */
 export const MAX_FUTURE_SKEW_MS = 5 * 60_000;
 const MAX_SIGNATURE_BYTES = 16 * 1024;
@@ -186,10 +193,13 @@ export async function loadKeyByFingerprint(
 export async function signDetached(
   data: Uint8Array,
   signingKey: PrivateKey,
-  opts: { notations?: Readonly<Record<string, string>>; date?: Date } = {},
+  opts: { notations?: Readonly<Record<string, string>> | readonly (readonly [string, string])[]; date?: Date } = {},
 ): Promise<Uint8Array> {
   if (!signingKey.isPrivate() || !signingKey.isDecrypted()) throw new G00passError('signing key must be an unlocked private key');
-  const notations = Object.entries(opts.notations ?? {}).map(([name, value]) => ({
+  const pairs: readonly (readonly [string, string])[] = Array.isArray(opts.notations)
+    ? (opts.notations as readonly (readonly [string, string])[])
+    : Object.entries(opts.notations ?? {});
+  const notations = pairs.map(([name, value]) => ({
     name,
     value: new TextEncoder().encode(value),
     humanReadable: true,
@@ -206,18 +216,51 @@ export async function signDetached(
 }
 
 /**
+ * Validate the `child@g00pass` values of a `.gpg-id.sig` made for `folder`.
+ * Each value is `/<folder>`: normalized, a STRICT descendant of `folder`,
+ * unique, and no value lies inside another (only direct children).
+ * Returns the sorted store-relative child folders, or an error message.
+ */
+export function childBoundariesFromNotations(values: readonly string[], folder: string): string[] | string {
+  const f = normalizePath(folder);
+  const out: string[] = [];
+  for (const v of values) {
+    if (!v.startsWith('/') || v === '/') return `invalid ${CHILD_NOTATION} value "${v}"`;
+    let c: string;
+    try {
+      c = normalizePath(v.slice(1));
+    } catch {
+      return `invalid ${CHILD_NOTATION} value "${v}"`;
+    }
+    if (c !== v.slice(1) || c === f || !isWithin(c, f)) return `${CHILD_NOTATION} "${v}" is not a folder below "${folderNotationValue(f)}"`;
+    if (out.includes(c)) return `duplicate ${CHILD_NOTATION} "${v}"`;
+    out.push(c);
+  }
+  for (const a of out) {
+    if (out.some((b) => b !== a && isWithin(a, b))) return `${CHILD_NOTATION} "/${a}" is not a direct child (it lies inside another declared child)`;
+  }
+  return out.sort();
+}
+
+/**
  * Sign a `.gpg-id` exactly as g00pass verifies it: binary detached signature
- * over the exact bytes, bound to `folder` by the `folder@g00pass` notation.
- * Compatible with pass (`gpg --verify` ignores the non-critical notation).
+ * over the exact bytes, bound to `folder` by the `folder@g00pass` notation,
+ * declaring the direct child boundaries with one `child@g00pass` notation
+ * each. Compatible with pass (`gpg --verify` ignores non-critical notations).
  *
- * Use as reencryptFolder's `gpgIdSignature: (text) => signGpgId(text, folder, key)`.
+ * Use as reencryptFolder's
+ * `gpgIdSignature: (text, { folder, children }) => signGpgId(text, folder, key, { children })`.
  */
 export async function signGpgId(
   gpgId: string | Uint8Array,
   folder: string,
   signingKey: PrivateKey,
-  opts: { date?: Date } = {},
+  opts: { date?: Date; children?: readonly string[] } = {},
 ): Promise<Uint8Array> {
   const bytes = typeof gpgId === 'string' ? new TextEncoder().encode(gpgId) : gpgId;
-  return signDetached(bytes, signingKey, { notations: { [FOLDER_NOTATION]: folderNotationValue(folder) }, date: opts.date });
+  const children = [...new Set((opts.children ?? []).map((c) => normalizePath(c)))].sort();
+  const bad = childBoundariesFromNotations(children.map(folderNotationValue), folder);
+  if (typeof bad === 'string') throw new G00passError(bad);
+  const notations: [string, string][] = [[FOLDER_NOTATION, folderNotationValue(folder)], ...children.map((c): [string, string] => [CHILD_NOTATION, folderNotationValue(c)])];
+  return signDetached(bytes, signingKey, { notations, date: opts.date });
 }

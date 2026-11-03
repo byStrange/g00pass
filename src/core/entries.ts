@@ -62,7 +62,10 @@ export async function writeEntry(opts: WriteEntryOptions): Promise<WriteEntryRes
     if (findGpgIdForEntry(has, cp) !== verified.gpgIdPath) {
       throw new G00passError(`Companion "${cp}" is not governed by ${verified.gpgIdPath}`);
     }
-    changes.push({ path: cp, content: await encryptToVerified(c.plaintext, verified, { armor: opts.armor }) });
+    // Each companion's own location goes through the choke-point too (it may
+    // lie in a different sub-folder, e.g. inside a vanished child boundary).
+    const own = await verifyRecipients(opts.snapshot, { entry: cp }, { signal: opts.signal });
+    changes.push({ path: cp, content: await encryptToVerified(c.plaintext, own, { armor: opts.armor }) });
   }
   const res = await opts.writer.commit(changes, {
     baseSha: opts.snapshot.commitSha,

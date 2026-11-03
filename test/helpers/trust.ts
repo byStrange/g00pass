@@ -57,12 +57,38 @@ export async function derive(base: StoreSnapshot, changes: Record<string, Uint8A
   return s;
 }
 
-/** `.gpg-id` text + folder-bound signature by `signer`. */
-export async function signedGpgId(folder: string, text: string, signer: PrivateKey, date?: Date) {
+/**
+ * `.gpg-id` text + folder-bound signature by `signer`, declaring the given
+ * direct child boundaries (`child@g00pass`). 4th argument: a date (legacy) or options.
+ */
+export async function signedGpgId(
+  folder: string,
+  text: string,
+  signer: PrivateKey,
+  dateOrOpts?: Date | { date?: Date; children?: string[] },
+) {
+  const o = dateOrOpts instanceof Date ? { date: dateOrOpts } : (dateOrOpts ?? {});
   const prefix = folder ? `${folder}/` : '';
   return {
     [`${prefix}.gpg-id`]: text,
-    [`${prefix}.gpg-id.sig`]: await signGpgId(text, folder, signer, { date }),
+    [`${prefix}.gpg-id.sig`]: await signGpgId(text, folder, signer, { date: o.date, children: o.children }),
+  };
+}
+
+/** Snapshot wrapper counting reads (e.g. to bound how many key files are parsed). */
+export function countingSnapshot(s: StoreSnapshot): StoreSnapshot & { reads: string[] } {
+  const reads: string[] = [];
+  return {
+    reads,
+    get commitSha() {
+      return s.commitSha;
+    },
+    listFiles: () => s.listFiles(),
+    hasFile: (p: string) => s.hasFile(p),
+    readFile: async (p: string) => {
+      reads.push(p);
+      return s.readFile(p);
+    },
   };
 }
 

@@ -66,6 +66,17 @@ export function nestedGpgIdFolders(snapshot: StoreSnapshot, folder: string): str
     .sort();
 }
 
+/**
+ * DIRECT nested boundaries of `folder` by file presence: sub-folders with
+ * their own `.gpg-id` that are not inside another nested one. Whether these
+ * are the AUTHORIZED boundaries is decided by the trust policy (signed
+ * `child@g00pass` declarations, docs/specs/gpg-id-signatures.md).
+ */
+export function directNestedGpgIdFolders(snapshot: StoreSnapshot, folder: string): string[] {
+  const nested = nestedGpgIdFolders(snapshot, folder);
+  return nested.filter((n) => !nested.some((m) => m !== n && isWithin(n, m)));
+}
+
 /** In-memory snapshot, used in tests and for offline previews. */
 export class MemoryStore implements StoreSnapshot {
   private readonly files = new Map<string, Uint8Array>();

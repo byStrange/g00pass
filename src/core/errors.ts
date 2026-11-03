@@ -53,7 +53,11 @@ export type TrustErrorCode =
   /** `.gpg-id` + `.sig` older than a version this device already accepted (rollback). */
   | 'replayed'
   /** Recipient id is not a full primary fingerprint, or its key file does not match it. */
-  | 'weak-recipient';
+  | 'weak-recipient'
+  /** A signed-declared (or device-known) child boundary's `.gpg-id` was deleted (gpg-id-signatures.md §Child boundaries). */
+  | 'boundary-vanished'
+  /** A nested `.gpg-id` is not declared by its parent boundary's signature, or a new signature declares the wrong children. */
+  | 'boundary-undeclared';
 
 /** Decryption of an entry failed (wrong key, corrupt data, not a recipient). */
 export class DecryptError extends G00passError {

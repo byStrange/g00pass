@@ -4,8 +4,10 @@ import type { GitHubRepo } from './github/client';
 import { ESCROW_FLAG, keyIdKind, normalizeKeyId, parseGpgId } from './gpgid';
 import { GPG_ID, GPG_ID_SIG } from './paths';
 import {
+  CHILD_NOTATION,
   FOLDER_NOTATION,
   SignatureFormatError,
+  childBoundariesFromNotations,
   folderNotationValue,
   loadKeyByFingerprint,
   parseDetachedSignature,
@@ -30,6 +32,8 @@ import type { PublicKey } from 'openpgp';
 export const ANCHORS_STORAGE_KEY = 'g00pass.trust-anchors.v1';
 export const SEEN_STORAGE_KEY = 'g00pass.gpgid-seen.v1';
 export const ADMINS_CACHE_STORAGE_KEY = 'g00pass.admins-cache.v1';
+/** Device-local high-water set of verified trust boundaries (folders with their own `.gpg-id`). */
+export const BOUNDARIES_STORAGE_KEY = 'g00pass.boundaries-seen.v1';
 
 export type AnchorSource = 'first-use' | 'invite' | 'manual' | 'rollover';
 
@@ -92,6 +96,7 @@ function clearDerivedState(storeId: string, what: { seen: boolean; admins: boole
   };
   if (what.seen) updateMap(SEEN_STORAGE_KEY, (_v): _v is unknown => true, drop);
   if (what.admins) updateMap(ADMINS_CACHE_STORAGE_KEY, (_v): _v is unknown => true, drop);
+  if (what.seen) updateMap(BOUNDARIES_STORAGE_KEY, (_v): _v is unknown => true, drop);
 }
 
 /**
@@ -156,7 +161,13 @@ export async function gpgIdDigest(content: Uint8Array, sig: Uint8Array | null): 
 // ---- `.gpg-id` signature check shared by root and folders ----
 
 export type GpgIdSignatureCheck =
-  | { ok: true; signer: string; created: Date }
+  | {
+      ok: true;
+      signer: string;
+      created: Date;
+      /** Direct child boundaries declared by the signature (`child@g00pass`), sorted. */
+      children: readonly string[];
+    }
   | { ok: false; code: TrustErrorCode; reason: string; signer?: string };
 
 /**
@@ -204,7 +215,11 @@ export async function checkGpgIdSignature(
       signer: res.signer.fingerprint,
     };
   }
-  return { ok: true, signer: res.signer.fingerprint, created: res.signer.created };
+  const children = childBoundariesFromNotations(parsed.notations.get(CHILD_NOTATION) ?? [], folder);
+  if (typeof children === 'string') {
+    return { ok: false, code: 'signature-invalid', reason: `invalid child boundary declaration: ${children}`, signer: res.signer.fingerprint };
+  }
+  return { ok: true, signer: res.signer.fingerprint, created: res.signer.created, children };
 }
 
 /** Best effort: which store key (if any) produced a valid signature? Only for error messages. */
@@ -267,6 +282,8 @@ export type RootTrust =
       readonly anchors: readonly string[];
       readonly escrow: readonly string[];
       readonly signer: string;
+      /** Direct child boundaries declared by the root `.gpg-id.sig`. */
+      readonly children: readonly string[];
       /** True when this evaluation re-pinned the anchors (validly signed change). */
       readonly rolledOver: boolean;
       readonly root: RootRecipients;
@@ -342,5 +359,5 @@ export async function evaluateRootTrust(snapshot: StoreSnapshot, signal?: AbortS
     clearDerivedState(storeId, { seen: false, admins: true });
     rolledOver = true;
   }
-  return { ok: true, anchors: root.admins, escrow: root.escrow, signer: chk.signer, rolledOver, root };
+  return { ok: true, anchors: root.admins, escrow: root.escrow, signer: chk.signer, children: chk.children, rolledOver, root };
 }
