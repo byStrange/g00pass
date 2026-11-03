@@ -38,9 +38,11 @@ losing the folder. There are two independent mechanisms.
 - `verifyProposedRecipients` (and therefore `reencryptFolder`, approve, and
   remove) **always merges** the current escrow line(s) into the new `.gpg-id`.
   A proposed set without escrow fails with `TrustError('escrow-missing')`.
-- When existing folders lack escrow, `verifyRecipients` adds the warning
-  `escrow-missing`. The UI shows a non-blocking "this folder is not
-  recoverable" notice to folder admins.
+- When an existing folder lacks escrow, the core adds the warning
+  `escrow-missing`, and the production trust hook (Phase 1) **refuses writes**
+  there with `TrustError('escrow-missing')`. Otherwise an admin could
+  silently drop the recovery key. Reads stay allowed. The remedy is a
+  re-encrypt (`reencryptFolder`), which merges escrow back in.
 - Escrow fingerprints are **never** global admins, folder admins, or trust
   anchors, even though they appear in the root `.gpg-id`.
 - The UI MUST NOT offer "remove member" for an escrow fingerprint.

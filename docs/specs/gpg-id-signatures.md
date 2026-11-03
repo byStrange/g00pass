@@ -1,8 +1,8 @@
 # `.gpg-id` signatures
 
-Status: specified; implement it as the `TrustHook` installed in `src/main.ts`
-(core-api.md §Trust choke-point). Phase 0 ships `passThroughTrustHook`, which is
-marked `TODO(trust)`.
+Status: **implemented** (Phase 1) as `signatureTrustHook` in
+`src/core/trust-policy.ts`. `src/main.ts` installs it and then calls
+`lockTrustHook()`. Tests: `test/trust-policy.test.ts`.
 
 ## Threat
 
@@ -11,88 +11,171 @@ their own key. Future secrets would then be encrypted to them. Write access is
 not the same as authority, so the client must verify who authored each
 recipient list before it encrypts.
 
-## Compatibility with pass and gopass
+## Format and compatibility with pass and gopass
 
 - **pass** with `PASSWORD_STORE_SIGNING_KEY="FPR1 FPR2"` writes
   `<folder>/.gpg-id.sig` using `gpg --detach-sign` (binary) on every
-  `pass init`. It then verifies the signature on every operation and accepts it
-  when `VALIDSIG` reports a listed fingerprint, either the signing subkey's or
-  the primary key's.
-- g00pass uses **the same file name and format**, so a store maintained with
-  pass and `PASSWORD_STORE_SIGNING_KEY` set to the global admins' fingerprints
-  is valid for g00pass, and the reverse also holds.
-- **gopass** neither creates nor checks `.gpg-id.sig` as far as we could
-  determine, and it leaves the file alone. After `gopass recipients add/remove`,
-  the old `.sig` no longer matches. g00pass will then refuse to encrypt in that
-  folder until an admin re-signs it.
-- `reencryptFolder` either writes a fresh signature or deletes the stale one, in
-  the same commit.
+  `pass init`, and accepts it when `VALIDSIG` reports a listed fingerprint
+  (signing subkey or primary key).
+- g00pass uses **the same file name and packet format**: one binary-document
+  (type 0x00) signature packet over the exact `.gpg-id` bytes, binary or
+  armored. pass and `gpg --verify` accept every signature g00pass writes.
+- **Folder binding (g00pass addition).** The signature MUST carry a signed
+  (hashed-area), non-critical notation
+
+  ```
+  folder@g00pass=/<folder>        e.g. "/" for the root, "/infra", "/clients/x"
+  ```
+
+  Without it, a `.gpg-id` + `.gpg-id.sig` pair signed for folder A can be
+  copied over folder B and still verify (the bytes are identical). That
+  cross-folder replay works against plain pass too. gpg and pass ignore the
+  notation, so the format stays byte-compatible. **A plain pass signature without
+  the notation is rejected for writing** (`signature-invalid`, "not bound to a
+  folder"). To produce a valid one with pass:
+
+  ```sh
+  PASSWORD_STORE_SIGNING_KEY=<FPR> \
+  PASSWORD_STORE_GPG_OPTS="--sig-notation folder@g00pass=/infra" \
+  pass init -p infra <FPR…>
+  # or directly: gpg -u <FPR> --sig-notation folder@g00pass=/infra --detach-sign -o infra/.gpg-id.sig infra/.gpg-id
+  ```
+
+  Only hashed notations count. openpgp.js ignores notations in the unhashed
+  area, so they cannot be injected without breaking the signature (tested).
+- **gopass** neither creates nor checks `.gpg-id.sig`. After
+  `gopass recipients add/remove`, the old `.sig` no longer matches, and
+  g00pass refuses to encrypt in that folder until an admin re-signs it.
+- `reencryptFolder` writes a fresh signature in the same commit. Without
+  one, the proposal is refused (`signature-missing`).
+
+Producer: `signGpgId(text, folder, privateKey, { date? })` in
+`src/core/signatures.ts`.
+
+## Recipient ids
+
+Every recipient line of a `.gpg-id` that g00pass encrypts to MUST be the
+**full primary fingerprint** of its key, and the key file MUST contain that
+exact primary key. Short ids, long ids, e-mail addresses and subkey
+fingerprints are refused (`weak-recipient`), because they bind the signed list
+to a key file the attacker can swap. A key file whose primary fingerprint
+differs from the id never resolves (`RecipientKeyError`). Reading is
+unaffected.
 
 ## Valid signers
 
-For `<F>/.gpg-id`, with F ≠ root:
-
 ```
-allowed(F) = trustAnchors ∪ admins(nearestAdminsFile(F))
-```
-
-- `trustAnchors` is the device's pinned global admin fingerprints
-  (store-layout.md).
-- `nearestAdminsFile(F)` is the first `.g00pass-admins.json` found at
-  `F`, `parent(F)`, …, stopping before the root. It must verify according to
-  folder-admins.md. An unverifiable admins file contributes **no** signers. It
-  does not cause the operation to fail.
-
-For the root `.gpg-id`:
-
-```
-allowed("") = trustAnchors
+allowed("")  = anchors
+allowed(F)   = anchors ∪ admins(F)                    (F ≠ root)
+admins(F)    = ⋃ { admins of the VALID .g00pass-admins.json at G | G ∈ {F, parent(F), …}, G ≠ root }
+anchors      = non-escrow fingerprints of the root .gpg-id, IF the root verifies (below)
 ```
 
-## Verification algorithm (`TrustHook.verify`)
+- Escrow fingerprints are never signers, even if pinned or listed.
+- Admin authority is **hierarchical**: an admin of `infra` may sign
+  `infra/prod/.gpg-id`. Invalid admins files contribute nothing and block
+  nothing (folder-admins.md).
+- The signer's key is read only from `.public-keys/<FPR>`. The file MUST hold
+  exactly one key whose primary fingerprint is `FPR`.
 
-Input: a `RecipientVerificationRequest` (`folder`, `gpgIdContent`,
-`gpgIdSignature`, `proposed`, `recipients`, `snapshot`).
+## Root `.gpg-id` and pinned anchors
 
-1. If `gpgIdSignature` is null, return
-   `{ok:false, code:'signature-missing'}`.
-2. Parse the signature. Accept binary or armored input, and require exactly one
-   signature packet of type 0x00. If it does not parse, return
-   `{ok:false, code:'signature-invalid'}`.
-3. Compute `allowed(folder)`. For each allowed fingerprint, resolve the key from
-   `.public-keys/<FPR>` in `snapshot`.
-4. Verify the detached signature over the **exact** `gpgIdContent` bytes. A
-   signature is accepted when all of these hold:
-   - it verifies cryptographically;
-   - the issuer matches an allowed key, by primary or signing-subkey
-     fingerprint;
-   - the key was not revoked and not expired at signature creation time;
-   - the creation time is no more than 5 minutes in the future.
+The root cannot vouch for itself (store-layout.md §Trust anchors). The root is
+**trusted** iff:
 
-   If it verifies but the signer is not allowed, return
-   `{ok:false, code:'unknown-signer'}`. If it does not verify, return
-   `{ok:false, code:'signature-invalid'}`.
-5. If `proposed`, the signature was just produced by the operator. The same
-   rules apply, so an operator who is neither a trust anchor nor a folder admin
-   cannot change recipients.
-6. Otherwise return `{ok:true}`. Add a warning when the signer is valid only
-   through an admins file whose chain could not be fully walked (folder-admins.md
-   §Chain).
-7. If trust anchors are not configured on this device, return
-   `{ok:false, code:'untrusted', reason:'no trust anchors pinned'}`.
+1. this device has pinned anchors for the store;
+2. every id in it is a full fingerprint;
+3. `.gpg-id.sig` verifies, is bound to `/`, and its signer is a pinned anchor
+   (or, for exactly the root version that caused the last rollover, its
+   signer: an anchor may sign themselves out);
+4. its signature is not older than the newest root signature this device
+   accepted (rollback).
 
-**Root `.gpg-id` change detection**: when the root `.gpg-id` verifies, the hook
-updates the pinned anchors as described in store-layout.md. It does this only
-after a successful verification against the *currently pinned* anchors.
+If the trusted root's admin set differs from the pinned set, the pinned set is
+**replaced** by it (rollover, `source: "rollover"`).
+
+**If the root is not trusted, nothing in the store is writable.** The escrow
+recipient comes from the root, and so do the anchors. The UI shows a red banner
+with the added and removed fingerprints.
+
+## Verification algorithm (`signatureTrustHook.verify`)
+
+Input: `RecipientVerificationRequest` (`folder`, `gpgIdContent`,
+`gpgIdSignature`, `proposed`, `recipients`, `snapshot`). Everything is read
+from `snapshot`, the same snapshot the caller encrypts from and uses as the
+commit base. Device state comes from the locked trust environment.
+
+1. Unknown store identity → `untrusted`.
+2. Root not trusted → its code (`untrusted` when no anchors are pinned,
+   `anchor-mismatch`, `signature-*`, `weak-recipient`, `replayed`).
+3. `gpgIdSignature` null → `signature-missing`.
+4. Parse: exactly one packet, type 0x00, v4/v6, creation time present; else
+   `signature-invalid`.
+5. Verify over the exact bytes against each key in `allowed(folder)`. A
+   signature counts for key K when:
+   - the issuer key id names K's primary key or a subkey, and the issuer
+     fingerprint subpacket matches it if present;
+   - it verifies cryptographically. openpgp.js also checks that the signing
+     (sub)key was valid at signature creation time, including the subkey
+     binding and the primary-key back-signature;
+   - the signing (sub)key is **also valid now**: not revoked, not expired.
+     Creation times are chosen by the signer, so "valid at signing time"
+     alone would let the holder of an expired or retired key back-date
+     signatures. Remedy for an expired admin key: extend it and re-upload
+     `.public-keys/<FPR>`;
+   - the creation time is at most 5 minutes in the future.
+
+   If the signature verifies against some other store key → `unknown-signer`
+   (with that fingerprint). Otherwise → `signature-invalid`.
+6. Folder notation missing or ≠ `/<folder>` → `signature-invalid`.
+7. Committed sets only: signature older than the newest one this device
+   accepted for this folder → `replayed`.
+8. Every recipient is a full primary fingerprint (§Recipient ids) → else
+   `weak-recipient`.
+9. Every root escrow fingerprint is a recipient → else `escrow-missing`. This
+   now applies to committed sets too (recovery.md).
+10. `ok`. A warning `admins-file-unverified:<G>` is added for every invalid
+    admins file on the path. The replay high-water mark is raised only now.
+
+### Proposed recipient lists (approve / remove / re-encrypt)
+
+`verifyProposedRecipients(snapshot, folder, lines, { signature })` runs
+the same hook with `proposed: true`:
+
+- Authorization is computed from the **current** snapshot: who is an anchor
+  or verified admin *now*. Files that the same commit would add (a new admins
+  file in `extraChanges`, new `.public-keys`) can never authorize their own
+  signer (tested).
+- The signature must be produced over the exact final text, after the
+  escrow merge. With `reencryptFolder`, pass
+  `gpgIdSignature: (text) => signGpgId(text, folder, operatorKey)`. The core
+  calls it with the exact bytes it will commit, and the result goes into the
+  same commit.
+- The approver must therefore be an anchor (any folder) or a verified admin of
+  the folder or an ancestor (non-root). Root proposals need an anchor.
+- No replay check, since the signature is fresh. The high-water mark is
+  raised when the committed result is next verified.
+
+## Replay: what is and isn't prevented
+
+| Attack | Result |
+| --- | --- |
+| Copy `.gpg-id` + `.sig` from folder A to folder B | **Prevented** (folder notation) |
+| Restore an older `.gpg-id` + `.sig` of the same folder (e.g. re-add a removed member) on a device that has verified a newer version | **Prevented** (`replayed`; per-device high-water mark of signature creation time in `g00pass.gpgid-seen.v1`) |
+| Same, on a device that never saw the newer version (new device, cleared storage) | **NOT prevented.** The old signature is genuine. Mitigation: branch protection / CODEOWNERS on `.gpg-id*`, and review of the commit history. |
+| Replay an older root after an anchor rollover | Prevented on devices that saw the newer root; otherwise the old root must still be signed by a *currently pinned* anchor |
+| Strip revocation or expiry self-signatures from a signer's key file (attacker holds the compromised private key) | **NOT prevented.** Key state comes from the store. Remove compromised keys from the anchors (rollover) or the admins file instead of relying on revocation alone. |
+| Old admins file version | Prevented on devices with a cached newer serial (folder-admins.md) |
 
 ## Client behaviour
 
 | Situation | Reads/decrypt | Encrypt/write in F | UI |
 | --- | --- | --- | --- |
-| valid signature | allowed | allowed | none |
-| missing `.sig` | allowed | **refused** (`TrustError signature-missing`) | Warning banner on F: "Recipients of F are not signed by an admin. Writing is disabled." |
-| invalid / unknown signer | allowed | **refused** | Red banner with the signer's fingerprint, if known: "Recipient list of F was changed by an unauthorized key." |
-| no anchors pinned | allowed | **refused** | Setup prompt to pin anchors |
+| valid signature | allowed | allowed | ✓ verified (per folder, Recipient trust card) |
+| missing `.sig` | allowed | **refused** (`signature-missing`) | ⚠ "Recipients of F are not signed by an admin. Writing is disabled." |
+| invalid / unknown signer / wrong folder | allowed | **refused** | ⚠ "changed by an unauthorized key or the signature is invalid" + reason (signer FPR if known) |
+| root not trusted | allowed | **refused everywhere** | red banner + added/removed fingerprints |
+| no anchors pinned | allowed | **refused** | pin prompt (full fingerprints, explicit out-of-band confirmation) |
 
 - Decryption never depends on `.gpg-id` and is always allowed.
 - The client MUST NOT offer an "encrypt anyway" button.
@@ -101,28 +184,31 @@ after a successful verification against the *currently pinned* anchors.
 
 ## Producing signatures
 
-- **Approve or remove (`reencryptFolder`):** pass
-  `gpgIdSignature: (text) => signDetached(text, operatorKey)`. The callback
-  receives the exact bytes that will be committed.
-- **Bootstrap or migration:** a global admin runs "Sign all recipient lists".
-  This is a later feature. It lists every `.gpg-id`, shows each recipient list
-  with names from `.public-keys`, asks for explicit confirmation, and commits
-  all the `.sig` files in one commit. The pass equivalent is
-  `PASSWORD_STORE_SIGNING_KEY=… pass init -p <F> <ids…>`.
+- **Approve or remove (`reencryptFolder`):** `gpgIdSignature: (text) => signGpgId(text, folder, operatorKey)`.
+- **Bootstrap or migration:** sign with gpg or pass as above. An in-app
+  "Sign all recipient lists" action for global admins is still a later
+  feature.
 
-## Test cases the implementation MUST cover
+## Test cases (all in `test/trust-policy.test.ts`)
 
 1. Valid signature by an anchor.
-2. Valid signature by a folder admin, both directly and inherited from an
+2. Valid signature by a folder admin, both direct and inherited from an
    ancestor's admins file.
-3. Signature by a non-admin, which yields `unknown-signer`.
-4. `.gpg-id` modified after signing, which yields `signature-invalid`.
+3. Signature by a non-admin recipient → `unknown-signer`.
+4. `.gpg-id` modified after signing → `signature-invalid`.
 5. Missing `.sig`.
-6. `.sig` copied from another folder, which is invalid because the bytes
-   differ.
+6. `.gpg-id` + `.sig` copied from another folder → `signature-invalid` (folder
+   binding).
 7. Revoked or expired signer key.
 8. A signing subkey that matches by primary fingerprint.
-9. A signature produced by `gpg --detach-sign`, from a fixture generated
-   offline and committed in `test/fixtures/`.
+9. `gpg --detach-sign` fixture (`test/fixtures/gpg/`), both folder-bound
+   (accepted) and plain pass style (rejected for writing).
 10. Root `.gpg-id` signed by a non-anchor.
-11. Anchor rollover.
+11. Anchor rollover, an anchor signing themselves out, and a replayed old
+    root.
+
+Also covered: the attacker's own signature, an escrow-line swap, escrow as
+signer, weak ids, swapped recipient or signer key files, escrow removed,
+future-dated, text-mode, multi-packet and garbage signatures, unhashed notation
+injection, same-folder replay, and proposed changes by a non-admin, without a
+signature, for the wrong folder, or self-authorized via `extraChanges`.

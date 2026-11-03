@@ -260,7 +260,7 @@ yet, so the delivery channel is the trust root. The newcomer confirms
    closes.
 4. Show the invite summary and the `anchors` fingerprints. Ask the user to
    confirm the anchors (ideally against what the admin told them). On
-   confirmation, pin them (store-layout.md §Trust anchors).
+   confirmation, pin them with `pinAnchors(repo, anchors, 'invite')` (store-layout.md §Trust anchors).
 5. Continue with key generation and submission.
 
 ### Admin client: issuing an invite

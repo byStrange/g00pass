@@ -19,7 +19,7 @@ codes. They must never contain plaintext, passphrases, keys or tokens.
 | `StorePathError` | bad path | |
 | `NoRecipientsError` | no `.gpg-id` up to the root | `path` |
 | `RecipientKeyError` | id doesn't resolve to exactly one usable public key | `recipientId` |
-| `TrustError` | choke-point refused | `folder`, `reason`, `code: 'untrusted' \| 'signature-missing' \| 'signature-invalid' \| 'unknown-signer' \| 'escrow-missing' \| 'not-verified'` |
+| `TrustError` | choke-point refused | `folder`, `reason`, `code: 'untrusted' \| 'signature-missing' \| 'signature-invalid' \| 'unknown-signer' \| 'escrow-missing' \| 'not-verified' \| 'anchor-mismatch' \| 'replayed' \| 'weak-recipient'` |
 | `DecryptError` | entry can't be decrypted | `path` |
 | `GitHubApiError` | non-2xx from GitHub | `status`, `retryAfterSeconds?` |
 | `ConflictError` | branch moved since the snapshot | `expectedSha`, `actualSha`, `retryable = true` |
@@ -116,7 +116,8 @@ interface RecipientVerificationRequest {
 type TrustDecision = { ok: true; warnings?: string[] } | { ok: false; code: TrustErrorCode; reason: string };
 interface TrustHook { name: string; verify(req): Promise<TrustDecision> }
 
-passThroughTrustHook           // Phase 0 default: ok + warning 'recipient-signatures-not-verified'
+unconfiguredTrustHook          // default until main.ts installs a policy: refuses everything
+passThroughTrustHook           // tests only (test/setup.ts): ok + warning 'recipient-signatures-not-verified'
 setTrustHook(hook): TrustHook  // install once at startup (src/main.ts); returns previous
 lockTrustHook(): void          // main.ts locks after install; later setTrustHook throws
 getTrustHook(): TrustHook
@@ -138,17 +139,57 @@ The core enforces these rules regardless of which hook is installed:
 - **Escrow (proposed sets).** Every root `.gpg-id` line flagged `g00pass:escrow`
   is merged into `gpgIdText`. If the merged set still lacks an escrow
   fingerprint, the result is `TrustError('escrow-missing')`.
-- **Escrow (existing sets).** If the folder lacks the escrow recipient, the set
-  is still allowed but gets a `warnings: ['escrow-missing']` entry.
+- **Escrow (existing sets).** If the folder lacks the escrow recipient, the core
+  adds `warnings: ['escrow-missing']`; the production hook then refuses
+  (`escrow-missing`).
 - **Signature binding.** `signature` may be a callback `(gpgIdText) => Promise<Uint8Array>`.
   It receives the exact final bytes and runs before the hook, so the hook can
   verify it.
 
-**To implement signature checks**, write a `TrustHook` that follows
-[gpg-id-signatures.md](gpg-id-signatures.md) and install it in `src/main.ts`.
+**Signature checks (Phase 1)** are implemented by `signatureTrustHook`
+(`src/core/trust-policy.ts`, [gpg-id-signatures.md](gpg-id-signatures.md)),
+installed in `src/main.ts`.
 Do not add new entry points that produce `VerifiedRecipientSet`. Tests may
 call `setTrustHook` freely, but production code may not call it outside
 `src/main.ts` (which calls `lockTrustHook()` right after installing the hook).
+
+## Trust policy (Phase 1)
+
+```ts
+// src/core/trust-env.ts: device-local inputs; frozen by lockTrustHook()
+interface TrustEnvironment { storage; storeId(snapshot): string | null; history(snapshot): FileHistory | null; now(): Date }
+trustEnvironment(); setTrustEnvironment(partial) /* tests */; resetTrustEnvironment(); MemoryTrustStorage
+storeIdOf(repo): string                      // "owner/repo|storeRoot", lower-cased owner/repo
+isTrustHookLocked(): boolean                 // src/core/trust.ts
+
+// src/core/anchors.ts
+pinAnchors(store: GitHubRepo | storeId, fingerprints, source: 'first-use' | 'invite' | 'manual'): PinnedAnchors
+getPinnedAnchors(store): PinnedAnchors | null; resetAnchors(store): void
+evaluateRootTrust(snapshot): Promise<RootTrust>   // { ok, anchors, escrow, signer, rolledOver } | { ok:false, code, reason, added, removed }
+normalizeFingerprints(fprs): string[]
+
+// src/core/signatures.ts
+signGpgId(text | bytes, folder, privateKey, { date? }): Promise<Uint8Array>   // folder-bound .gpg-id.sig
+signDetached(bytes, privateKey, { notations?, date? }); parseDetachedSignature(bytes); verifyDetached(bytes, parsed, keys, now)
+loadKeyByFingerprint(snapshot, FPR): Promise<PublicKey | null>                // primary FPR must match
+
+// src/core/admins.ts
+verifyAdminsFile(snapshot, folder): Promise<AdminsFileStatus>                  // absent | valid | invalid(reason)
+verifiedFolderAdmins(snapshot, folder): Promise<{ admins: Set<FPR>; files }>
+checkFolderAdmin(snapshot, folder, fpr): Promise<{ admin; via: 'anchor' | 'admins-file' | null; grantedBy?; reason }>
+isVerifiedFolderAdmin(snapshot, folder, fpr): Promise<boolean>
+signAdminsFile({ snapshot, folder, admins, signingKey, date? }): Promise<{ document, path, sigPath, content, signature, changes }>
+
+// src/core/trust-policy.ts
+signatureTrustHook: TrustHook                 // name 'gpg-id signatures v1'
+folderTrustStatus(snapshot, folder); allFolderTrustStatus(snapshot)   // UI status = real write-path decision
+
+// src/core/canonical.ts
+canonicalJson(v); parseCanonicalJson(bytes); sortKeysDeep(v); sha256Digest(bytes) /* "sha256:hex" */; rfc3339(date)
+
+// src/core/github/history.ts
+GitHubFileHistory; GitHubSnapshot.fileHistory()  // history reachable from the snapshot commit
+```
 
 ## Crypto — `src/core/crypto/`
 

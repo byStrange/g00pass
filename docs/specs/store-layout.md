@@ -60,20 +60,38 @@ AAAABBBBCCCCDDDDEEEEFFFF0000111122223333
 - **Global admins** are the non-escrow recipients of the root `.gpg-id`.
 - The root `.gpg-id` cannot vouch for itself, because anyone with write access
   could replace it and self-sign. Each device therefore keeps **trust anchors**,
-  a locally pinned set of global-admin fingerprints. They are stored in
-  `localStorage` under `g00pass.trust-anchors.v1` as
-  `{"repo":"owner/repo","storeRoot":"","anchors":["FPR",...],"pinnedAt":"ISO"}`.
-  They are not secret, but they MUST NOT be writable from the store.
-- Anchors are set in one of three ways:
-  1. From an invite link (`anchors` field, access-requests.md). The user
-     confirms the fingerprints in the UI.
-  2. On first use: the client shows the root `.gpg-id` fingerprints and asks
-     the user to confirm them out of band.
-  3. Manually in settings.
-- Anchors are updated automatically **only** when a new root `.gpg-id` carries
-  a valid `.gpg-id.sig` from a currently pinned anchor. In that case the new
-  anchor set is the new root `.gpg-id`'s non-escrow fingerprints. Any other
-  change to the root `.gpg-id` is treated as untrusted (gpg-id-signatures.md).
+  a locally pinned set of global-admin fingerprints **per store**.
+  `localStorage['g00pass.trust-anchors.v1']` holds
+  `{"<owner>/<repo>|<storeRoot>": {"anchors":["FPR",...],"pinnedAt":"ISO","source":"first-use|invite|manual|rollover","rootDigest"?,"rootSigner"?}}`
+  (owner/repo lower-cased; `storeIdOf(repo)`). The anchors are not secret, but
+  they MUST NOT be writable from the store. Anything unparseable is treated as
+  "not pinned" (fail closed).
+  - Deploy the app on a **dedicated origin**: every page on the same origin
+    can write `localStorage`. For example, `user.github.io/*` is shared by all
+    of that user's pages.
+- Anchors are set in one of three ways. Each requires showing the **full**
+  fingerprints and an explicit user confirmation:
+  1. From an invite link (`anchors` field, access-requests.md):
+     `pinAnchors(repo, invite.anchors, 'invite')`.
+  2. On first connect: the client shows the root `.gpg-id` fingerprints and
+     asks the user to confirm them out of band
+     (`pinAnchors(repo, fprs, 'first-use')`).
+  3. Manually, from settings (`'manual'`). Settings also show the pinned set
+     and can reset it (`resetAnchors`).
+
+  Pinning a different set, or resetting, clears the device's derived state
+  for the store: the replay high-water marks and the admins cache.
+- **Rollover.** Anchors are updated automatically **only** when the root
+  `.gpg-id` carries a valid, folder-bound `.gpg-id.sig` from a currently
+  pinned anchor and is not a replay. The new anchor set is then the new root's
+  non-escrow fingerprints. The signer of that root version stays accepted for
+  exactly that version (`rootDigest`/`rootSigner`), so an anchor can sign
+  themselves out. A device that missed two rollovers cannot follow the chain
+  and must re-pin. Any other change to the root `.gpg-id` makes the whole
+  store unwritable (`anchor-mismatch`, gpg-id-signatures.md).
+- Per-folder replay high-water marks are kept in
+  `localStorage['g00pass.gpgid-seen.v1']` as
+  `{"<storeId>|<folder>": {"created": ms, "digest": "sha256:…"}}`.
 
 ## Shared formats
 
@@ -107,9 +125,14 @@ files.
 - openpgp.js: `sign({ message: await createMessage({ binary: bytes }), signingKeys, detached: true, format: 'binary' })`.
 - The signer's public key MUST be available at `.public-keys/<FPR>` in the same
   snapshot.
-- The signature counts for a fingerprint `S` if the issuer key's primary
-  fingerprint **or** the signing subkey's fingerprint equals `S`. This is
-  pass's `VALIDSIG` rule.
+- The signature counts for a fingerprint `S` if it was made by the key whose
+  **primary** fingerprint is `S`, using the primary key or a properly bound
+  signing subkey (pass's `VALIDSIG` rule). g00pass authorization lists
+  (anchors, `admins`, `updatedBy`) always hold primary fingerprints. The
+  signing (sub)key must be valid at signature creation time **and now**, and the
+  creation time may be at most 5 minutes in the future.
+- `.gpg-id.sig` additionally carries the hashed notation `folder@g00pass=/<folder>`
+  (gpg-id-signatures.md §Folder binding).
 
 **Signed JSON envelope type tags**: every g00pass JSON document has
 `"type": "g00pass.<kind>"` and `"version": <int>`. Verifiers MUST reject unknown
