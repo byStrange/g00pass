@@ -7,9 +7,20 @@ always confirms the fingerprint out of band.
 
 ## Where requests live
 
-- By default, requests are issues on the **store repo**.
-- The repo can instead name a separate private **requests repo** in a signed
-  `.g00pass/config.json`. This is recommended.
+**Requests go to a separate private "requests repo" by default.** The store
+repo is only a fallback.
+
+Resolution order in the client:
+
+1. `requestsRepo` from an invite (§Invites), if the user arrived through one.
+2. The app's repo config field `requestsRepo` (`"owner/name"`, set in the
+   Repository settings; stored with the other non-secret repo settings).
+3. A signed `.g00pass/config.json` in the store (below), once trust
+   verification can read it.
+4. Fallback: the **store repo**. The UI MUST show a warning that a separate
+   private requests repo is recommended.
+
+The signed config shape:
 
 ```json
 {
@@ -20,7 +31,7 @@ always confirms the fingerprint out of band.
 ```
 
 The file is canonical JSON with a detached `.sig` from a trust anchor. A
-missing, unsigned, or invalid config means `requestsRepo = <store repo>`.
+missing, unsigned, or invalid config means no value from this source.
 
 **Why a separate repo is recommended:** an invite token has
 `Issues: Read and write`. With it, the holder can read, edit, and close *every*
@@ -114,17 +125,26 @@ wnUEARYKACcFgm…
 
 1. Generate the key:
    - v4, `type: 'ecc', curve: 'curve25519Legacy'`;
-   - the user id is the name the user enters, plus an optional e-mail;
-   - the passphrase is chosen by the user, and the key is stored protected
-     (core-api.md §Crypto).
+   - the user id is the name and e-mail the user enters;
+   - the passphrase is chosen by the user (at least 12 characters, confirmed
+     twice), never leaves the browser, and the key is stored protected with
+     the default **iterated-and-salted S2K**, never Argon2 (core-api.md
+     §Crypto). An existing armored private key can be imported instead (v4,
+     Ed25519 or RSA ≥ 3072, protected);
+   - the UI shows the fingerprint prominently, in groups of 4, with the hint
+     to share it out of band with the admin.
 2. Also generate the revocation certificate, and offer the recovery kit
    (recovery.md) **before** submitting.
 3. Build the canonical JSON and the cleartext signature, then build the body.
 4. Check for duplicates: list open issues in `requestsRepo` and skip creation if
    one already contains a request with the same `fingerprint` and `folder`.
 5. Submit with
-   `POST /repos/{requestsRepo}/issues {title, body, labels:["g00pass:access-request"]}`.
-   Labels may be dropped silently, which is fine.
+   `POST /repos/{requestsRepo}/issues {title, body, labels:["g00pass:access-request"]}`
+   (`GitHubClient.createIssue`). The token is the invite token or one the user
+   pastes; it is held in memory only (`TokenStore('memory')`), never persisted
+   and never in an error message. A 401/403/404 is reported as "this token
+   cannot create issues in the requests repo". Labels may be dropped silently,
+   which is fine.
 6. Remember `{issueNumber, requestsRepo}` locally; this is not secret. Poll
    `GET /repos/{requestsRepo}/issues/{n}` at most once a minute while the tab
    is open.

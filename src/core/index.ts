@@ -21,3 +21,15 @@ export * from './anchors';
 export * from './admins';
 export * from './trust-policy';
 export { GitHubFileHistory, type FileHistory, type FileVersion } from './github/history';
+export * from './requests/keygen';
+export {
+  buildAccessRequest,
+  groupFingerprint,
+  REQUEST_LABEL,
+  REQUEST_ROLES,
+  RequestBuildError,
+  type AccessRequestInput,
+  type BuiltAccessRequest,
+  type RequestRole,
+} from './requests/build';
+export * from './requests/submit';

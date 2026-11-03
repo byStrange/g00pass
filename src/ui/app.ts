@@ -13,6 +13,7 @@ import {
 } from '../core';
 import { h, clear } from './dom';
 import { deviceKeyInfo, forgetDeviceKey, loadDeviceKeyArmored, saveDeviceKey } from './keystore';
+import { createEnrollment } from './enroll';
 import { Session, copyWithAutoClear } from './session';
 import { createTrustPanel } from './trust';
 
@@ -23,9 +24,9 @@ const CLIPBOARD_CLEAR_MS = 30_000;
 function loadConfig(): GitHubRepo {
   try {
     const c = JSON.parse(localStorage.getItem(CONFIG_KEY) ?? '{}') as Partial<GitHubRepo>;
-    return { owner: c.owner ?? '', repo: c.repo ?? '', branch: c.branch ?? 'main', storeRoot: c.storeRoot ?? '' };
+    return { owner: c.owner ?? '', repo: c.repo ?? '', branch: c.branch ?? 'main', storeRoot: c.storeRoot ?? '', requestsRepo: c.requestsRepo ?? '' };
   } catch {
-    return { owner: '', repo: '', branch: 'main', storeRoot: '' };
+    return { owner: '', repo: '', branch: 'main', storeRoot: '', requestsRepo: '' };
   }
 }
 
@@ -66,6 +67,7 @@ export function mountApp(root: HTMLElement): void {
     repo: h('input', { name: 'repo', required: true, autocomplete: 'off', spellcheck: 'false' }),
     branch: h('input', { name: 'branch', required: true, autocomplete: 'off' }),
     storeRoot: h('input', { name: 'storeRoot', autocomplete: 'off', placeholder: '(repo root)' }),
+    requestsRepo: h('input', { name: 'requestsRepo', autocomplete: 'off', spellcheck: 'false', placeholder: 'owner/name (recommended)' }),
     token: h('input', { name: 'token', type: 'password', autocomplete: 'off', placeholder: 'fine-grained, read-only' }),
     remember: h('input', { type: 'checkbox', name: 'remember' }),
   };
@@ -73,6 +75,7 @@ export function mountApp(root: HTMLElement): void {
   f.repo.value = config.repo;
   f.branch.value = config.branch;
   f.storeRoot.value = config.storeRoot ?? '';
+  f.requestsRepo.value = config.requestsRepo ?? '';
   f.remember.checked = tokens.hasToken;
 
   const configForm = h(
@@ -86,11 +89,13 @@ export function mountApp(root: HTMLElement): void {
           repo: f.repo.value.trim(),
           branch: f.branch.value.trim() || 'main',
           storeRoot: f.storeRoot.value.trim(),
+          requestsRepo: f.requestsRepo.value.trim(),
         };
         localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
         if (f.token.value) tokens.set(f.token.value, f.remember.checked ? 'session' : 'memory');
         f.token.value = '';
         void refresh();
+        void enroll.render();
       },
     },
     h('h2', {}, 'Repository'),
@@ -98,16 +103,27 @@ export function mountApp(root: HTMLElement): void {
     h('label', {}, 'Repository', f.repo),
     h('label', {}, 'Branch', f.branch),
     h('label', {}, 'Store folder', f.storeRoot),
+    h('label', {}, 'Requests repo (private, for access requests)', f.requestsRepo),
+    h('p', { class: 'hint' }, 'Leave empty to use the store repo. A separate private requests repo is recommended.'),
     h('label', {}, 'GitHub token', f.token),
     h('label', { class: 'inline' }, f.remember, 'Keep token for this tab (sessionStorage)'),
     h('div', { class: 'row' }, h('button', { type: 'submit' }, 'Save & load'), h('button', { type: 'button', onclick: () => { tokens.clear(); setStatus('Token forgotten.'); } }, 'Forget token')),
   );
+
+  const enroll = createEnrollment({
+    getConfig: () => config,
+    getUnlockedKey: () => session.unlockedKey,
+    mainToken: tokens.get,
+    setStatus,
+    onKeyChanged: () => void renderKeyCard(),
+  });
 
   // ----- device key -----
   const keyCard = h('section', { class: 'card' });
   const passphrase = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Passphrase' });
 
   async function renderKeyCard() {
+    void enroll.render();
     clear(keyCard);
     keyCard.append(h('h2', {}, 'Device key'));
     const info = await deviceKeyInfo().catch(() => null);
@@ -260,7 +276,7 @@ export function mountApp(root: HTMLElement): void {
     void renderKeyCard();
   }
 
-  root.append(header, status, configForm, trust.card, keyCard, entriesCard, entryView, trust.settings, footer);
+  root.append(header, status, configForm, trust.card, keyCard, enroll.el, entriesCard, entryView, trust.settings, footer);
   render();
   if (tokens.hasToken) void refresh();
 }
