@@ -12,6 +12,8 @@ import {
   type TakenInvite,
 } from '../core';
 import { notice } from './components';
+import { type IconName, icon } from './icons';
+import { avatar, splitUserId } from './people';
 import { type AppCtx, CONFIG_KEY, loadConfig, storeLabel } from './context';
 import { h } from './dom';
 import { mountFolders } from './folders';
@@ -85,19 +87,31 @@ function start(root: HTMLElement, invite: TakenInvite): void {
   let joinEl: HTMLElement | null = null;
   let generation = 0;
 
+  // Floating toast (aria-live). Errors stay until replaced or dismissed; other messages fade.
   const status = h('p', { class: 'status', role: 'status', 'aria-live': 'polite' });
+  const toastIcon = h('span', { class: 'toast-icon' });
+  const toastClose = h('button', { type: 'button', class: 'toast-close', 'aria-label': 'Dismiss' }, icon('x', { size: 16 }));
+  const toastEl = h('div', { class: 'toast', hidden: true }, toastIcon, status, toastClose);
   let toastTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Errors stay until replaced; other messages fade after a while (longer ones stay longer). */
+  const hideToast = () => {
+    toastEl.classList.add('leaving');
+    setTimeout(() => {
+      toastEl.hidden = true;
+      toastEl.classList.remove('leaving');
+    }, 180);
+  };
+  toastClose.addEventListener('click', hideToast);
   const toast = (text: string, isError = false) => {
     if (toastTimer) clearTimeout(toastTimer);
     status.textContent = text;
-    status.classList.toggle('error', isError);
-    status.hidden = !text;
-    if (text && !isError && !text.endsWith('…')) toastTimer = setTimeout(() => (status.hidden = true), Math.max(6000, text.length * 90));
+    toastEl.classList.toggle('error', isError);
+    toastEl.classList.remove('leaving');
+    toastIcon.replaceChildren(icon(isError ? 'alert' : text.endsWith('…') ? 'clock' : 'check', { size: 18 }));
+    toastEl.hidden = !text;
+    if (text && !isError && !text.endsWith('…')) toastTimer = setTimeout(hideToast, Math.max(5000, text.length * 80));
   };
-  const headerRight = h('div', { class: 'header-right' });
-  const header = h('header', { class: 'topbar' }, h('div', { class: 'brand' }, h('span', { class: 'logo', 'aria-hidden': 'true' }, '🔐'), h('span', {}, 'g00pass')), headerRight);
   const main = h('main', { class: 'main' });
+  let me: { fingerprint: string; name: string; email: string | null } | null = null;
 
   const session = new Session(IDLE_LOCK_MS, () => {
     toast('Locked.');
@@ -157,19 +171,38 @@ function start(root: HTMLElement, invite: TakenInvite): void {
     await rerender();
   }
 
-  function renderHeader(unlocked: boolean) {
-    headerRight.replaceChildren(
-      snapshot ? h('span', { class: 'store-chip', title: `Branch ${config.branch}` }, storeLabel(config)) : '',
-      unlocked ? h('button', { type: 'button', class: 'ghost small', onclick: () => session.lock() }, 'Lock') : '',
-    );
+  const brand = () => h('div', { class: 'brand' }, h('span', { class: 'brand-mark' }, icon('shield', { size: 18 })), h('span', { class: 'brand-name' }, 'g00pass'));
+
+  /** Setup, unlock and join screens: centered, with the brand above. */
+  function authFrame(view: HTMLElement): HTMLElement {
+    return h('div', { class: 'auth' }, h('header', { class: 'auth-head' }, brand()), view, h('p', { class: 'auth-foot' }, icon('lock', { size: 14 }), 'End-to-end encrypted. Secrets are only ever decrypted in this browser.'));
   }
 
+  const PAGES: Record<Tab, { title: string; lead: string }> = {
+    secrets: { title: 'Secrets', lead: 'Passwords and notes your team shares.' },
+    access: { title: 'People', lead: 'Invite people, approve requests, and manage who can open which folder.' },
+    settings: { title: 'Settings', lead: 'Your connection, your key, and the admins this browser trusts.' },
+  };
+
   function shell(): HTMLElement {
-    const tabs: [Tab, string][] = [['secrets', 'Secrets'], ...(adminOf.length ? ([['access', 'Access']] as [Tab, string][]) : []), ['settings', 'Settings']];
+    const tabs: [Tab, string, IconName][] = [['secrets', 'Secrets', 'key'], ...(adminOf.length ? ([['access', 'People', 'users']] as [Tab, string, IconName][]) : []), ['settings', 'Settings', 'settings']];
     if (!tabs.some(([t]) => t === tab)) tab = 'secrets';
     const badge = h('span', { class: 'badge count', hidden: requestCount === 0 }, String(requestCount));
-    const nav = h('nav', { class: 'tabs', role: 'tablist' }, ...tabs.map(([t, label]) =>
-      h('button', { type: 'button', role: 'tab', 'aria-selected': String(t === tab), class: 'tab', onclick: () => { if (tab === t) return; tab = t; void rerender(); } }, label, t === 'access' ? badge : '')));
+    const nav = h('nav', { class: 'nav', role: 'tablist', 'aria-label': 'Sections' }, ...tabs.map(([t, label, ic]) =>
+      h('button', { type: 'button', role: 'tab', 'aria-selected': String(t === tab), class: 'nav-item', onclick: () => { if (tab === t) return; tab = t; void rerender(); } }, icon(ic, { size: 20 }), h('span', { class: 'nav-label' }, label), t === 'access' ? badge : '')));
+    const meP = me ? { fingerprint: me.fingerprint, name: me.name, escrow: false } : null;
+    const sidebar = h(
+      'aside',
+      { class: 'sidebar' },
+      brand(),
+      h('div', { class: 'store-card', title: `Branch ${config.branch}` }, icon('github', { size: 16 }), h('span', {}, storeLabel(config))),
+      nav,
+      h('div', { class: 'sidebar-spacer' }),
+      meP
+        ? h('div', { class: 'me-card' }, avatar(meP, 'md'), h('div', { class: 'me-text' }, h('b', { class: 'uid', dir: 'auto' }, meP.name), h('span', { class: 'hint' }, adminOf.length ? 'Admin' : 'Member')),
+            h('button', { type: 'button', class: 'icon-btn', title: 'Lock', 'aria-label': 'Lock', onclick: () => session.lock() }, icon('lock')))
+        : '',
+    );
     let content: HTMLElement;
     if (tab === 'access') {
       const inbox = mountInbox({
@@ -188,13 +221,24 @@ function start(root: HTMLElement, invite: TakenInvite): void {
       const folders = mountFolders({ client, getConfig: () => config, getSnapshot: () => snapshot, session, setStatus: toast, onChanged: (note) => void reload(note), memory: folderMemory });
       folders.refresh();
       void inbox.refresh();
-      content = h('div', { class: 'access' }, h('section', { class: 'panel intro' }, h('p', {}, 'Give people access by inviting them to a folder, approve their request here, and remove them when they leave.'), howSharingWorks()), inbox.el, folders.el);
+      content = h('div', { class: 'access' }, inbox.el, folders.el, h('section', { class: 'panel intro' }, howSharingWorks()));
     } else if (tab === 'settings') {
       content = settingsView(ctx);
     } else {
       content = secretsView(ctx, secretsMemory);
     }
-    return h('div', { class: 'shell' }, rootTrust && !rootTrust.ok ? trustBanner(rootTrust) : '', nav, h('div', { class: 'tab-body', role: 'tabpanel' }, content));
+    const page = PAGES[tab];
+    return h(
+      'div',
+      { class: 'app-shell' },
+      sidebar,
+      h('div', { class: 'content' },
+        h('header', { class: 'page-head' },
+          h('div', {}, h('h1', { class: 'page-title' }, page.title), h('p', { class: 'page-lead' }, page.lead)),
+          h('button', { type: 'button', class: 'icon-btn mobile-only', title: 'Lock', 'aria-label': 'Lock now', onclick: () => session.lock() }, icon('lock'))),
+        rootTrust && !rootTrust.ok ? trustBanner(rootTrust) : '',
+        h('div', { class: 'tab-body', role: 'tabpanel' }, content)),
+    );
   }
 
   async function rerender(): Promise<void> {
@@ -210,11 +254,15 @@ function start(root: HTMLElement, invite: TakenInvite): void {
       const p = loadPending();
       view = p ? pendingFlow(ctx, p, () => void rerender()) : connectScreen(ctx);
     } else if (!snapshot) {
-      view = loading ? h('p', { class: 'hint center' }, 'Loading…') : connectScreen(ctx, { error: loadError ?? undefined });
+      view = loading ? h('div', { class: 'loading' }, h('span', { class: 'spinner' }), 'Opening your vault…') : connectScreen(ctx, { error: loadError ?? undefined });
     } else if (rootTrust && !rootTrust.ok && !rootTrust.pinned) {
       view = verifyAdminsScreen(ctx, rootTrust);
     } else {
       const info = await deviceKeyInfo().catch(() => null);
+      if (info) {
+        const { name, email } = splitUserId(info.userIds[0] ?? '');
+        me = { fingerprint: info.fingerprint, name: name || 'You', email };
+      }
       if (!info) view = keyScreen(ctx);
       else if (!session.unlockedKey) view = unlockScreen(ctx, info);
       else {
@@ -223,13 +271,13 @@ function start(root: HTMLElement, invite: TakenInvite): void {
       }
     }
     if (gen !== generation) return;
-    renderHeader(!!session.unlockedKey);
-    main.replaceChildren(view);
+    const inShell = view.classList.contains('app-shell');
+    main.classList.toggle('in-shell', inShell);
+    main.replaceChildren(inShell ? view : authFrame(view));
   }
 
   if (invite.kind === 'invalid') toast(`This invite link cannot be used: ${invite.reason}`, true);
-  root.append(header, status, main);
-  status.hidden = true;
+  root.append(main, toastEl);
   if (!joining && config.owner && tokens.hasToken) void reload();
   else void rerender();
 }

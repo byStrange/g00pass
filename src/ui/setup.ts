@@ -51,7 +51,7 @@ export function connectScreen(ctx: AppCtx, opts: { error?: string; embedded?: bo
     help('More settings', field('Branch', branch), field('Store folder inside the repo', storeRoot), field('Requests repository', requestsRepo, 'A separate private repo where access requests are filed as issues. Leave empty to use the store repo (not recommended).')),
   );
   if (opts.embedded) return body;
-  return screen({ steps: SETUP_STEPS, step: 0, title: 'Connect your password store', lead: 'g00pass reads your gopass/pass store straight from GitHub and decrypts it in this browser. Nothing else ever sees your secrets.' }, body);
+  return screen({ steps: SETUP_STEPS, step: 0, title: 'Connect your password store', icon: 'github', lead: 'g00pass reads your gopass/pass store straight from GitHub and decrypts it in this browser. Nothing else ever sees your secrets.' }, body);
 }
 
 async function claimedName(snapshot: StoreSnapshot, fpr: string): Promise<string> {
@@ -68,7 +68,7 @@ export function verifyAdminsScreen(ctx: AppCtx, root: Extract<RootTrust, { ok: f
   const snapshot = ctx.snapshot()!;
   const fprs = root.root?.admins ?? [];
   if (!fprs.length) {
-    return screen({ steps: SETUP_STEPS, step: 1, title: 'This store is not set up for g00pass yet' }, notice('danger', root.reason), h('p', {}, 'The root .gpg-id must list the admins and be signed by one of them. See docs/specs/gpg-id-signatures.md §Migrating.'));
+    return screen({ steps: SETUP_STEPS, step: 1, title: 'This store is not set up for g00pass yet', icon: 'alert' }, notice('danger', root.reason), h('p', {}, 'The root .gpg-id must list the admins and be signed by one of them. See docs/specs/gpg-id-signatures.md §Migrating.'));
   }
   const ok = h('input', { type: 'checkbox' });
   const list = h('ul', { class: 'admin-list' });
@@ -83,7 +83,7 @@ export function verifyAdminsScreen(ctx: AppCtx, root: Extract<RootTrust, { ok: f
     await ctx.reload('Admins verified.');
   }, { variant: 'primary', onError: (m) => ctx.toast(m, true) });
   return screen(
-    { steps: SETUP_STEPS, step: 1, title: 'Check who the admins are', lead: `${storeLabel(ctx.config())} names these admins. This browser will only trust member lists they (or folder admins they appoint) signed.` },
+    { steps: SETUP_STEPS, step: 1, title: 'Check who the admins are', icon: 'shield', lead: `${storeLabel(ctx.config())} names these admins. This browser will only trust member lists they (or folder admins they appoint) signed.` },
     list,
     notice('warn', h('b', {}, 'Compare every fingerprint with your admin'), ' — in person, on a call, or in a chat you already trust. The names come from the repository and prove nothing; the fingerprint is what counts.'),
     h('label', { class: 'check' }, ok, 'I compared the fingerprints and they match.'),
@@ -93,7 +93,7 @@ export function verifyAdminsScreen(ctx: AppCtx, root: Extract<RootTrust, { ok: f
 
 export function keyScreen(ctx: AppCtx): HTMLElement {
   return screen(
-    { steps: SETUP_STEPS, step: 2, title: 'Your personal key', lead: 'Secrets are encrypted to people’s keys. Your key stays in this browser, protected by your passphrase.' },
+    { steps: SETUP_STEPS, step: 2, title: 'Your personal key', icon: 'key', lead: 'Secrets are encrypted to people’s keys. Your key stays in this browser, protected by your passphrase.' },
     keyChooser(async () => ctx.reload('Key saved on this device.'), (m) => ctx.toast(m, true)),
   );
 }
@@ -123,7 +123,7 @@ export function unlockScreen(ctx: AppCtx, info: StoredKeyInfo): HTMLElement {
   );
   queueMicrotask(() => pass.focus());
   return screen(
-    { title: 'Unlock', lead: `Enter the passphrase for ${name}.` },
+    { title: 'Unlock', icon: 'lock', lead: `Enter the passphrase for ${name}.` },
     f,
     h('p', { class: 'hint' }, `Key …${(info.fingerprint.slice(-16).match(/.{4}/g) ?? []).join(' ')}`),
     h('button', {

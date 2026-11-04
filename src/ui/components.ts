@@ -1,27 +1,28 @@
 import { G00passError } from '../core';
 import { h } from './dom';
+import { type IconName, icon } from './icons';
 
 /** Small building blocks shared by the screens. All text goes through text nodes. */
 
 export const errMsg = (e: unknown) => (e instanceof G00passError ? e.message : e instanceof Error && e.name === 'AbortError' ? 'Cancelled.' : 'Unexpected error');
 
-/** Step indicator: "1 Connect — 2 Verify admins — 3 Your key". */
+/** Segmented progress: "Step 2 of 3 · Verify admins". */
 export function stepper(steps: readonly string[], current: number): HTMLElement {
   return h(
-    'ol',
-    { class: 'stepper', 'aria-label': `Step ${current + 1} of ${steps.length}` },
-    ...steps.map((s, i) =>
-      h('li', { class: i < current ? 'done' : i === current ? 'current' : '', 'aria-current': i === current ? 'step' : false }, h('span', { class: 'dot' }, i < current ? '✓' : String(i + 1)), h('span', { class: 'label' }, s)),
-    ),
+    'div',
+    { class: 'stepper', role: 'group', 'aria-label': `Step ${current + 1} of ${steps.length}: ${steps[current]}` },
+    h('div', { class: 'stepper-bar' }, ...steps.map((s, i) => h('span', { class: i < current ? 'done' : i === current ? 'current' : '', title: s }))),
+    h('div', { class: 'stepper-label' }, `Step ${current + 1} of ${steps.length}`, h('b', {}, ` · ${steps[current]}`)),
   );
 }
 
 /** A focused, centered screen for one step of a flow. */
-export function screen(opts: { steps?: readonly string[]; step?: number; title: string; lead?: string }, ...body: (Node | string | null | false)[]): HTMLElement {
+export function screen(opts: { steps?: readonly string[]; step?: number; title: string; lead?: string; icon?: IconName }, ...body: (Node | string | null | false)[]): HTMLElement {
   return h(
     'section',
     { class: 'screen' },
     opts.steps ? stepper(opts.steps, opts.step ?? 0) : null,
+    opts.icon ? h('div', { class: 'screen-icon' }, icon(opts.icon, { size: 26 })) : null,
     h('h2', { class: 'screen-title' }, opts.title),
     opts.lead ? h('p', { class: 'lead' }, opts.lead) : null,
     ...body,

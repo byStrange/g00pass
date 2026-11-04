@@ -73,10 +73,44 @@ export function namesSentence(people: readonly Person[], me: string | null): str
 
 /** Name in bold, e-mail and short fingerprint below. */
 export function personBlock(p: Person, opts: { me?: string | null } = {}): HTMLElement {
+  return h('div', { class: 'person-row' }, avatar(p), personText(p, opts));
+}
+
+function personText(p: Person, opts: { me?: string | null }): HTMLElement {
   return h(
     'div',
     { class: 'person' },
     h('div', {}, h('b', { class: 'uid', dir: 'auto' }, p.name), p.fingerprint === opts.me ? h('span', { class: 'badge' }, 'you') : '', p.escrow ? h('span', { class: 'badge' }, 'recovery') : ''),
     h('div', { class: 'hint' }, p.email ? h('span', { class: 'uid', dir: 'auto' }, `${p.email} · `) : '', h('span', { class: 'mono', title: p.fingerprint }, `key …${shortFpr(p.fingerprint)}`)),
   );
+}
+
+/** Stable color index (0-7) for a fingerprint or name. */
+function hue(seed: string): number {
+  let x = 0;
+  for (const c of seed) x = (x * 31 + c.charCodeAt(0)) >>> 0;
+  return x % 8;
+}
+
+export function initials(name: string): string {
+  const parts = name.replace(/[^\p{L}\p{N}\s]/gu, ' ').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  return ((parts[0]![0] ?? '') + (parts.length > 1 ? parts[parts.length - 1]![0] ?? '' : '')).toUpperCase();
+}
+
+/** Round avatar with initials; the color comes from the key, so it is the same everywhere. */
+export function avatar(p: Pick<Person, 'name' | 'fingerprint' | 'escrow'>, size: 'sm' | 'md' | 'lg' = 'md'): HTMLElement {
+  return h('span', { class: `avatar ${size} av-${p.escrow ? 'escrow' : hue(p.fingerprint)}`, 'aria-hidden': 'true' }, p.escrow ? '⛑' : initials(p.name));
+}
+
+/** Overlapping avatars, "+N" after `max`. */
+export function avatarStack(people: readonly Person[], max = 4): HTMLElement {
+  const shown = people.slice(0, max);
+  return h('span', { class: 'avatar-stack', title: people.map((p) => p.name).join(', ') }, ...shown.map((p) => avatar(p, 'sm')), people.length > max ? h('span', { class: 'avatar sm more' }, `+${people.length - max}`) : '');
+}
+
+/** Tile for a folder or secret: first letter on a color from its name. */
+export function tile(name: string, size: 'sm' | 'md' | 'lg' = 'md'): HTMLElement {
+  const base = name.split('/').filter(Boolean).pop() ?? name;
+  return h('span', { class: `tile ${size} av-${hue(name)}`, 'aria-hidden': 'true' }, (base[0] ?? '?').toUpperCase());
 }

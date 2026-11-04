@@ -17,6 +17,8 @@ import {
 } from '../core';
 import { clear, h } from './dom';
 import { renderPlan } from './plan';
+import { avatar } from './people';
+import { icon } from './icons';
 import type { Session } from './session';
 
 export interface InboxDeps {
@@ -135,6 +137,7 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
       maxlength: '24',
       inputmode: 'text',
       placeholder: `last ${FINGERPRINT_SUFFIX_LENGTH} characters`,
+      class: 'code-input',
       'aria-label': `Last ${FINGERPRINT_SUFFIX_LENGTH} characters of the fingerprint, as the requester told you`,
     });
     const reviewed = h('input', { type: 'checkbox' });
@@ -215,26 +218,35 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
       }
     });
 
+    const who = { name: r.name, fingerprint: r.fingerprint, escrow: false };
+    const step = (n: number, title: string, ...body: (Node | string | null)[]) =>
+      h('section', { class: 'req-step' }, h('div', { class: 'req-step-num' }, String(n)), h('div', { class: 'req-step-body' }, h('h4', {}, title), ...body));
     const card = h(
       'article',
       { class: 'request' },
-      h('h3', { dir: 'auto' }, `${r.name} `, h('span', { class: 'badge' }, `#${issue.number}`)),
-      h('p', { class: 'hint uid', dir: 'auto' }, r.userIds.length ? `Key user id: ${r.userIds.join(', ')}` : 'Key has no user id'),
-      r.email ? h('p', { dir: 'auto' }, `E-mail on key: ${r.email}`) : null,
-      h('p', { class: 'fpr mono', dir: 'ltr', 'aria-label': 'Full fingerprint' }, formatFingerprint(r.fingerprint)),
-      h('p', {}, `Folder: ${r.folder}  ·  Role: ${r.role}`),
-      h('p', {}, h('span', { class: 'badge ok' }, 'Signature valid'), ' ', h('span', { class: 'hint' }, 'proves the requester holds this key, not who they are')),
-      h('p', {}, invited
-        ? h('span', { class: 'badge ok' }, `Invited (${invite.record.role}, by ${invite.record.issuedBy.slice(-16)}, expires ${invite.record.expiresAt})`)
-        : h('span', { class: 'badge warn' }, r.inviteId ? `Invite not valid: ${invite && !invite.valid ? invite.reason : 'unknown'}` : 'Uninvited')),
-      r.note ? h('pre', { class: 'details', dir: 'auto' }, r.note) : null,
-      renderPlan(plan),
-      h('label', {}, `Ask ${r.name} for their fingerprint through another channel (not this issue) and type its LAST ${FINGERPRINT_SUFFIX_LENGTH} characters:`, suffix),
-      h('label', { class: 'inline' }, reviewed, 'I reviewed the member change above (before → after) and approve exactly that.'),
-      invited ? '' : h('label', { class: 'inline' }, ack, 'I understand this request has no verified invite.'),
-      h('div', { class: 'row' }, approveBtn, cancelBtn),
-      progress,
-      h('div', { class: 'row' }, reason, denyBtn),
+      h('header', { class: 'req-head' },
+        avatar(who, 'lg'),
+        h('div', { class: 'req-who' },
+          h('h3', { dir: 'auto', class: 'uid' }, r.name),
+          h('div', { class: 'hint uid', dir: 'auto' }, r.email ?? (r.userIds[0] ?? 'no e-mail on key')),
+          h('div', { class: 'chips' },
+            h('span', { class: 'chip' }, icon('folder', { size: 14 }), `${r.role === 'reader' ? 'Reader' : 'Folder admin'} · ${r.folder}/`),
+            invited
+              ? h('span', { class: 'chip ok' }, icon('check', { size: 14 }), `Invited by …${invite.record.issuedBy.slice(-8)}`)
+              : h('span', { class: 'chip warn' }, icon('alert', { size: 14 }), r.inviteId ? `Invite not valid: ${invite && !invite.valid ? invite.reason : 'unknown'}` : 'No invite'),
+            h('span', { class: 'chip' }, `#${issue.number}`))),
+      ),
+      r.note ? h('blockquote', { class: 'req-note', dir: 'auto' }, r.note) : null,
+      step(1, `Confirm it is really ${r.name}`,
+        h('p', { class: 'hint' }, `Call or message ${r.name} (not through this request) and ask for the ${FINGERPRINT_SUFFIX_LENGTH}-character code on their screen. Type it here:`),
+        suffix,
+        h('details', { class: 'fpr-details' }, h('summary', {}, 'Show their full key fingerprint'), h('p', { class: 'fpr mono', dir: 'ltr', 'aria-label': 'Full fingerprint' }, formatFingerprint(r.fingerprint)), h('p', { class: 'hint' }, 'The request is signed by this key: that proves they hold it, not who they are.'))),
+      step(2, 'Check who will have access', renderPlan(plan), h('label', { class: 'check' }, reviewed, 'I reviewed the member change above (before → after) and approve exactly that.')),
+      step(3, 'Approve',
+        invited ? '' : h('label', { class: 'check' }, ack, 'I understand this request has no verified invite.'),
+        h('div', { class: 'actions' }, approveBtn, cancelBtn),
+        progress,
+        h('details', { class: 'deny' }, h('summary', {}, 'Decline instead'), h('div', { class: 'row' }, reason, denyBtn))),
     );
     return card;
   }
