@@ -48,6 +48,7 @@ async function profile(): Promise<{ ctx: BrowserContext; page: Page }> {
   });
   const page = await ctx.newPage();
   pages.push(page);
+  page.on('dialog', (d) => void d.accept());
   page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && errors.push(`console: ${m.text()}`));
   // Expected 404s: GitHub probes (over-scope check) and denied reads; anything else is a bug.
@@ -148,6 +149,25 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     expect(await reveal(p, 'team/wiki')).toBe('correct-horse-battery');
     await shot(p, '04-secrets');
 
+    // ---- admin: add a secret, then change its password ----
+    await p.getByRole('button', { name: '+ New secret' }).click();
+    const detail = p.locator('section.detail');
+    await detail.getByLabel('Folder', { exact: true }).selectOption('team');
+    await detail.getByLabel('Name', { exact: true }).fill('github');
+    await detail.getByRole('button', { name: 'Generate' }).click();
+    expect((await detail.getByLabel('Password', { exact: true }).inputValue()).length).toBe(20);
+    await detail.getByLabel('Notes').fill('user: deploy-bot');
+    await detail.locator('.readers').getByText(/Demo Member/).waitFor();
+    await shot(p, '05-new-secret');
+    await detail.getByRole('button', { name: 'Add secret' }).click();
+    await waitStatus(p, /Added team\/github/);
+    await detail.getByRole('heading', { name: 'team/github' }).waitFor();
+    await detail.getByRole('button', { name: 'Edit' }).click();
+    await detail.getByLabel('Password', { exact: true }).fill('github-pass-v2');
+    await detail.getByRole('button', { name: 'Save changes' }).click();
+    await waitStatus(p, /recorded as a rotation/);
+    expect(gh.head(STORE).has('team/.g00pass-rotation.gpg')).toBe(true); // the change is recorded for the password checklist
+
     // ---- admin: invite someone to team/ ----
     await openFolder(p, 'team/');
     await p.getByText('Invite someone to team/').click();
@@ -157,7 +177,7 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     await count(linkBox, 1);
     const link = await linkBox.inputValue();
     expect(link.startsWith(`${APP}#g00pass-invite=`)).toBe(true);
-    await shot(p, '05-access-invite');
+    await shot(p, '06-access-invite');
 
     // ---- newcomer: invite flow ----
     const B = await profile();
@@ -166,7 +186,7 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     expect(new URL(q.url()).hash).toBe(''); // fragment stripped at once
     await onScreen(q, /invited/);
     expect((await q.locator('.admin-list .mono').allTextContents()).map((t) => t.replace(/\s+/g, ''))).toEqual([admin.fingerprint]);
-    await shot(q, '06-join-check-admins');
+    await shot(q, '07-join-check-admins');
     await q.getByText('The fingerprint matches what my admin told me.').click();
     await q.getByRole('button', { name: 'Continue' }).click();
 
@@ -185,7 +205,7 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     await onScreen(q, /Waiting for approval/);
     const tail = ((await q.locator('.fpr-tail').textContent()) ?? '').replace(/\s+/g, '');
     expect(tail).toMatch(/^[0-9A-F]{16}$/);
-    await shot(q, '07-join-waiting');
+    await shot(q, '08-join-waiting');
     expect(gh.repo(REQUESTS).issues).toHaveLength(1);
     expect(gh.repo(REQUESTS).issues[0]!.body).not.toContain('github_pat_');
 
@@ -198,8 +218,8 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     await count(item, 1);
     await count(item.locator('.badge.ok', { hasText: 'Invited' }), 1);
     await item.getByPlaceholder('last 16 characters').fill(tail);
-    await item.getByText('I reviewed the recipient change above').click();
-    await shot(p, '08-access-approve');
+    await item.getByText('I reviewed the member change above').click();
+    await shot(p, '09-access-approve');
     await item.getByRole('button', { name: 'Approve' }).click();
     await waitStatus(p, /Approved in/);
     const issue = gh.repo(REQUESTS).issues[0]!;
@@ -210,12 +230,13 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     // ---- newcomer: notices the approval, connects, decrypts ----
     await q.getByRole('button', { name: 'Check now' }).click();
     await onScreen(q, /You are approved/);
-    await shot(q, '09-join-connect');
+    await shot(q, '10-join-connect');
     await q.getByLabel('Read token for the store').fill(READER_TOKEN);
     await q.getByRole('button', { name: 'Connect' }).click();
     await unlock(q, NEW_PASS);
     expect(await reveal(q, 'team/wiki')).toBe('correct-horse-battery');
-    await shot(q, '10-newcomer-secrets');
+    expect(await reveal(q, 'team/github')).toBe('github-pass-v2');
+    await shot(q, '11-newcomer-secrets');
 
     // ---- admin: remove the newcomer, rotation checklist ----
     await openFolder(p, 'team/');
@@ -224,8 +245,16 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     await box.getByText('I reviewed this exact change and approve it.').click();
     await box.getByRole('button', { name: 'Remove member' }).click();
     await waitStatus(p, /Removed/);
-    await p.getByText(/Rotate after removing/).first().waitFor({ state: 'visible', timeout: 30_000 });
-    await shot(p, '11-access-rotation');
+    await p.getByText(/Change these passwords/).first().waitFor({ state: 'visible', timeout: 30_000 });
+    expect(await p.locator('.checklist').textContent()).toContain('team/github');
+    await shot(p, '12-access-rotation');
+
+    // ---- admin: delete the secret ----
+    await tabTo(p, 'Secrets');
+    await p.getByRole('button', { name: 'team/github', exact: true }).click();
+    await p.locator('section.detail').getByRole('button', { name: 'Delete' }).click();
+    await waitStatus(p, /Deleted team\/github/);
+    expect(gh.head(STORE).has('team/github.gpg')).toBe(false);
     expect(new TextDecoder().decode(gh.head(STORE).get('team/.gpg-id')!)).not.toContain(tail);
 
     // The newcomer reloads: no folder is readable any more.

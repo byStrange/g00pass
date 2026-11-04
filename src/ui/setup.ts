@@ -83,7 +83,7 @@ export function verifyAdminsScreen(ctx: AppCtx, root: Extract<RootTrust, { ok: f
     await ctx.reload('Admins verified.');
   }, { variant: 'primary', onError: (m) => ctx.toast(m, true) });
   return screen(
-    { steps: SETUP_STEPS, step: 1, title: 'Check who the admins are', lead: `${storeLabel(ctx.config())} names these admins. This device will only trust recipient lists they (or folder admins they appoint) signed.` },
+    { steps: SETUP_STEPS, step: 1, title: 'Check who the admins are', lead: `${storeLabel(ctx.config())} names these admins. This browser will only trust member lists they (or folder admins they appoint) signed.` },
     list,
     notice('warn', h('b', {}, 'Compare every fingerprint with your admin'), ' — in person, on a call, or in a chat you already trust. The names come from the repository and prove nothing; the fingerprint is what counts.'),
     h('label', { class: 'check' }, ok, 'I compared the fingerprints and they match.'),
@@ -125,7 +125,7 @@ export function unlockScreen(ctx: AppCtx, info: StoredKeyInfo): HTMLElement {
   return screen(
     { title: 'Unlock', lead: `Enter the passphrase for ${name}.` },
     f,
-    h('p', { class: 'hint' }, 'Key ', fingerprint(info.fingerprint)),
+    h('p', { class: 'hint' }, `Key …${(info.fingerprint.slice(-16).match(/.{4}/g) ?? []).join(' ')}`),
     h('button', {
       type: 'button',
       class: 'ghost small',
@@ -142,7 +142,7 @@ export function unlockScreen(ctx: AppCtx, info: StoredKeyInfo): HTMLElement {
 export function trustBanner(root: Extract<RootTrust, { ok: false }>): HTMLElement {
   return notice(
     'danger',
-    h('b', {}, 'Recipient list not trusted. '),
+    h('b', {}, 'Admin list not trusted. '),
     `${root.reason}. You can still read, but nothing can be changed until this is resolved. Do not ignore this: someone may be trying to add their key. `,
     root.added.length ? h('div', {}, 'Not trusted but listed: ', ...root.added.map((a) => fingerprint(a))) : null,
   );

@@ -20,7 +20,7 @@ import { joinFlow, pendingFlow } from './join';
 import { deviceKeyInfo } from './keystore';
 import { acknowledgeOriginRisk, assessOrigin, isOriginRiskAcknowledged } from './origin';
 import { loadPending } from './request';
-import { secretsView } from './secrets';
+import { howSharingWorks, secretsView } from './secrets';
 import { Session } from './session';
 import { settingsView } from './settings';
 import { connectScreen, describeLoadError, keyScreen, trustBanner, unlockScreen, verifyAdminsScreen } from './setup';
@@ -80,6 +80,7 @@ function start(root: HTMLElement, invite: TakenInvite): void {
   let adminOf: string[] = [];
   let requestCount = 0;
   const folderMemory: { folder: string | null } = { folder: null };
+  const secretsMemory: { selected: string | null } = { selected: null };
   let joining: Invite | null = invite.kind === 'invite' ? invite.invite : null;
   let joinEl: HTMLElement | null = null;
   let generation = 0;
@@ -187,11 +188,11 @@ function start(root: HTMLElement, invite: TakenInvite): void {
       const folders = mountFolders({ client, getConfig: () => config, getSnapshot: () => snapshot, session, setStatus: toast, onChanged: (note) => void reload(note), memory: folderMemory });
       folders.refresh();
       void inbox.refresh();
-      content = h('div', { class: 'access' }, inbox.el, folders.el);
+      content = h('div', { class: 'access' }, h('section', { class: 'panel intro' }, h('p', {}, 'Give people access by inviting them to a folder, approve their request here, and remove them when they leave.'), howSharingWorks()), inbox.el, folders.el);
     } else if (tab === 'settings') {
       content = settingsView(ctx);
     } else {
-      content = secretsView(ctx);
+      content = secretsView(ctx, secretsMemory);
     }
     return h('div', { class: 'shell' }, rootTrust && !rootTrust.ok ? trustBanner(rootTrust) : '', nav, h('div', { class: 'tab-body', role: 'tabpanel' }, content));
   }
