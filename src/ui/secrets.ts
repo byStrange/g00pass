@@ -23,8 +23,9 @@ import {
   wipe,
   type StoreSnapshot,
 } from '../core';
-import { errMsg, field, form, help, input, notice } from './components';
-import { members, namesSentence } from './people';
+import { errMsg, field, form, help, input, link, notice } from './components';
+import { avatarStack, members, namesSentence, tile } from './people';
+import { icon } from './icons';
 import { type AppCtx, folderLabel } from './context';
 import { clear, h } from './dom';
 import { type PendingRequest, loadPending, requestForm, waitingView } from './request';
@@ -60,10 +61,15 @@ export function secretsView(ctx: AppCtx, memory: SecretsMemory = { selected: nul
   const key = ctx.session.unlockedKey!;
   const fpr = key.getFingerprint().toUpperCase();
   const search = h('input', { type: 'search', placeholder: 'Search secrets', 'aria-label': 'Search secrets', autocomplete: 'off', spellcheck: 'false' });
-  const newBtn = h('button', { type: 'button', class: 'primary' }, '+ New secret');
+  const newBtn = h('button', { type: 'button', class: 'primary' }, icon('plus'), 'New secret');
   const tree = h('nav', { class: 'tree', 'aria-label': 'Secrets' });
   const detail = h('section', { class: 'detail', 'aria-live': 'polite' });
-  const el = h('div', { class: 'secrets' }, h('div', { class: 'pane-left' }, newBtn, search, tree), detail);
+  const el = h(
+    'div',
+    { class: 'secrets' },
+    h('div', { class: 'toolbar' }, h('label', { class: 'search' }, icon('search'), search), newBtn),
+    h('div', { class: 'secrets-body' }, h('div', { class: 'pane-left' }, tree), detail),
+  );
   const entries = listEntries(snapshot).filter((e) => !isHiddenEntry(e));
   const has = (p: string) => snapshot.hasFile(p);
   const governing = (e: string) => gpgIdFolder(findGpgIdForEntry(has, e));
@@ -80,7 +86,9 @@ export function secretsView(ctx: AppCtx, memory: SecretsMemory = { selected: nul
       return h('p', { class: 'hint' }, 'No member list covers this location.');
     }
     const people = await members(snapshot, folder);
-    return h('p', { class: 'readers' }, h('span', { class: 'hint' }, `Readable by `), namesSentence(people, fpr), h('span', { class: 'hint' }, ` — the members of ${folderLabel(folder)}`));
+    return h('div', { class: 'readers' },
+      avatarStack(people, 5),
+      h('div', {}, h('div', { class: 'readers-label' }, 'Shared with'), h('div', {}, namesSentence(people, fpr)), h('div', { class: 'hint' }, `Everyone in ${folderLabel(folder)}`)));
   }
 
   void accessibleFolders(snapshot, fpr).then(({ all, mine }) => {
@@ -102,7 +110,7 @@ export function secretsView(ctx: AppCtx, memory: SecretsMemory = { selected: nul
       for (const [d, list] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
         tree.append(
           h('div', { class: 'group' },
-            h('div', { class: 'group-title' }, d ? `${d}/` : '/'),
+            h('div', { class: 'group-title' }, icon('folder', { size: 14 }), d ? `${d}/` : 'Top level'),
             h('ul', {}, ...list.map((e) => {
               const ok = canRead(e);
               const name = e.slice(d ? d.length + 1 : 0, -4);
@@ -112,7 +120,7 @@ export function secretsView(ctx: AppCtx, memory: SecretsMemory = { selected: nul
                 title: ok ? e.slice(0, -4) : 'You are not a member of this folder',
                 'aria-label': e.slice(0, -4),
                 onclick: () => void open(e, ok),
-              }, ok ? name : `🔒 ${name}`));
+              }, tile(e.slice(0, -4), 'sm'), h('span', { class: 'entry-name' }, name), ok ? '' : icon('lock', { size: 14, cls: 'entry-lock' })));
             })),
           ),
         );
@@ -124,8 +132,10 @@ export function secretsView(ctx: AppCtx, memory: SecretsMemory = { selected: nul
     const empty = () =>
       detail.replaceChildren(
         h('div', { class: 'empty' },
-          h('p', {}, 'Pick a secret on the left, or add one.'),
-          h('p', { class: 'hint' }, `You are a member of ${[...mine].map(folderLabel).join(', ')}.`),
+          h('div', { class: 'empty-icon' }, icon('key', { size: 28 })),
+          h('h3', {}, entries.length ? 'Select a secret' : 'No secrets yet'),
+          h('p', { class: 'hint' }, entries.length ? 'Pick one from the list to see or copy it.' : 'Add the first one with “New secret”. Only the members of its folder can open it.'),
+          h('p', { class: 'hint' }, `You can open secrets in ${[...mine].map(folderLabel).join(', ')}.`),
           howSharingWorks()),
       );
     const reopen = memory.selected;
@@ -133,16 +143,22 @@ export function secretsView(ctx: AppCtx, memory: SecretsMemory = { selected: nul
     if (reopen && entries.includes(reopen)) void open(reopen, canRead(reopen));
     else empty();
 
+    /** On narrow screens the detail sits below the list: bring it into view. */
+    function focusDetail() {
+      if (typeof matchMedia === 'function' && matchMedia('(max-width: 60rem)').matches) detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
     async function open(e: string, ok: boolean) {
       active = e;
       renderTree();
+      focusDetail();
       if (!ok) {
-        detail.replaceChildren(h('h3', {}, e.slice(0, -4)), notice('info', `You are not a member of ${folderLabel(governing(e))}, so you cannot open this. Ask one of its admins for access.`), await readers(e));
+        detail.replaceChildren(secretHead(e), notice('info', `You are not a member of ${folderLabel(governing(e))}, so you cannot open this. Ask one of its admins for access.`), await readers(e));
         return;
       }
       const k = ctx.session.unlockedKey;
       if (!k) return ctx.rerender();
-      detail.replaceChildren(h('p', { class: 'hint' }, 'Decrypting…'));
+      detail.replaceChildren(h('div', { class: 'loading' }, h('span', { class: 'spinner' }), 'Decrypting…'));
       let plain: Uint8Array | null = null;
       try {
         plain = await readEntry(snapshot, e, [k]);
@@ -150,36 +166,43 @@ export function secretsView(ctx: AppCtx, memory: SecretsMemory = { selected: nul
         const nl = text.indexOf('\n');
         const password = nl === -1 ? text : text.slice(0, nl).replace(/\r$/, '');
         const rest = nl === -1 ? '' : text.slice(nl + 1);
-        const pw = h('code', { class: 'secret' }, '••••••••••');
-        const more = h('pre', { class: 'details', hidden: true }, rest);
+        const copy = (value: string, what: string) =>
+          copyWithAutoClear(value, CLIPBOARD_CLEAR_MS, () => ctx.toast('Clipboard cleared.')).then(() => ctx.toast(`${what} copied. The clipboard clears in 30 seconds.`), () => ctx.toast('Clipboard not available.', true));
+        const pw = h('code', { class: 'secret' }, '••••••••••••');
         let shown = false;
-        const toggle = h('button', { type: 'button' }, 'Show');
+        const toggle = h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Show', title: 'Show' }, icon('eye'));
         toggle.addEventListener('click', () => {
           shown = !shown;
-          pw.textContent = shown ? password : '••••••••••';
-          more.hidden = !shown;
-          toggle.textContent = shown ? 'Hide' : 'Show';
+          pw.textContent = shown ? password : '••••••••••••';
+          pw.classList.toggle('revealed', shown);
+          toggle.replaceChildren(icon(shown ? 'eyeOff' : 'eye'));
+          toggle.setAttribute('aria-label', shown ? 'Hide' : 'Show');
+          toggle.title = shown ? 'Hide' : 'Show';
         });
-        const status = h('p', { class: 'hint' });
+        // "key: value" lines become labelled fields with their own copy button; the rest are notes.
+        const fields: { k: string; v: string }[] = [];
+        const notesLines: string[] = [];
+        for (const line of rest.split('\n')) {
+          const m = /^([A-Za-z][\w .-]{0,30}):\s*(.+)$/.exec(line.replace(/\r$/, ''));
+          if (m && !/^https?$/i.test(m[1]!)) fields.push({ k: m[1]!, v: m[2]! });
+          else if (line.trim()) notesLines.push(line);
+        }
+        const fieldRow = (label: string, value: Node, ...actions: Node[]) => h('div', { class: 'secret-field' }, h('div', { class: 'secret-field-label' }, label), h('div', { class: 'secret-field-value' }, value, h('div', { class: 'secret-field-actions' }, ...actions)));
+        const status = h('p', { class: 'trust-line' });
         detail.replaceChildren(
-          h('h3', {}, e.slice(0, -4)),
-          h('div', { class: 'secret-row' }, pw),
-          h('div', { class: 'actions' },
-            h('button', {
-              type: 'button',
-              class: 'primary',
-              onclick: () => copyWithAutoClear(password, CLIPBOARD_CLEAR_MS, () => ctx.toast('Clipboard cleared.')).then(() => ctx.toast('Copied. The clipboard clears in 30 seconds.'), () => ctx.toast('Clipboard not available.', true)),
-            }, 'Copy password'),
-            toggle,
-            h('button', { type: 'button', onclick: () => editor(e, password, rest) }, 'Edit'),
-            h('button', { type: 'button', class: 'danger', onclick: () => void remove(e) }, 'Delete'),
-            h('button', { type: 'button', class: 'ghost', onclick: () => { active = null; renderTree(); empty(); } }, 'Close')),
-          rest ? more : '',
+          secretHead(e, h('div', { class: 'head-actions' },
+            h('button', { type: 'button', onclick: () => editor(e, password, rest) }, icon('edit'), 'Edit'),
+            h('button', { type: 'button', class: 'danger ghost', onclick: () => void remove(e) }, icon('trash'), 'Delete'),
+            h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', title: 'Close', onclick: () => { active = null; renderTree(); empty(); } }, icon('x')))),
+          h('div', { class: 'secret-fields' },
+            fieldRow('Password', pw, toggle, h('button', { type: 'button', class: 'primary small', onclick: () => void copy(password, 'Password') }, icon('copy', { size: 16 }), 'Copy password')),
+            ...fields.map((f) => fieldRow(f.k, h('span', { class: 'field-text', dir: 'auto' }, /^(url|link|website|site)$/i.test(f.k) && /^https:\/\//.test(f.v) ? link(f.v, f.v) : f.v), h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Copy ${f.k}`, title: `Copy ${f.k}`, onclick: () => void copy(f.v, f.k) }, icon('copy')))),
+            notesLines.length ? fieldRow('Notes', h('pre', { class: 'details' }, notesLines.join('\n'))) : ''),
           await readers(e),
           status,
         );
         const st = await folderTrustStatus(snapshot, dirname(entryFile(e))).catch(() => null);
-        if (st) status.replaceChildren(st.verified ? `✓ This member list is signed by an admin.` : h('span', { class: 'danger-text' }, `⚠ The member list of ${folderLabel(st.folder)} is not verified (${st.reason ?? st.code}). Saving here is disabled.`));
+        if (st) status.replaceChildren(st.verified ? h('span', { class: 'ok-text' }, icon('shield', { size: 16 }), 'Member list signed by an admin') : h('span', { class: 'danger-text' }, icon('alert', { size: 16 }), `The member list of ${folderLabel(st.folder)} is not verified (${st.reason ?? st.code}). Saving here is disabled.`));
       } catch (err) {
         detail.replaceChildren(notice('danger', errMsg(err)));
         ctx.toast(errMsg(err), true);
@@ -279,9 +302,20 @@ export function secretsView(ctx: AppCtx, memory: SecretsMemory = { selected: nul
         h('button', { type: 'button', class: 'ghost small', onclick: () => (path ? void open(path, true) : (active = null, renderTree(), empty())) }, 'Cancel'),
       );
       (path ? pw : name).focus();
+      focusDetail();
     }
   });
   return el;
+}
+
+/** Header of a secret: tile, name, folder breadcrumb, optional actions. */
+function secretHead(path: string, actions?: HTMLElement): HTMLElement {
+  const name = path.slice(0, -4);
+  const i = name.lastIndexOf('/');
+  return h('div', { class: 'secret-head' },
+    tile(name, 'lg'),
+    h('div', { class: 'secret-title' }, h('div', { class: 'crumb' }, i === -1 ? 'Top level' : name.slice(0, i).split('/').join(' / ')), h('h2', {}, i === -1 ? name : name.slice(i + 1))),
+    actions ?? '');
 }
 
 /** Short explainer of the sharing model, in plain words. */
@@ -316,7 +350,7 @@ function noAccess(ctx: AppCtx, folders: readonly string[]): HTMLElement {
         onError: (m) => ctx.toast(m, true),
       }),
     );
-  const wait = (p: PendingRequest) => box.replaceChildren(h('h3', {}, 'Waiting for approval'), waitingView({ pending: p, token: () => ctx.tokens.get(), onApproved: () => void ctx.reload('Approved — welcome!'), onCancel: ask, onError: (m) => ctx.toast(m, true) }));
+  const wait = (p: PendingRequest) => box.replaceChildren(h('div', { class: 'screen-icon' }, icon('clock', { size: 26 })), h('h3', {}, 'Waiting for approval'), waitingView({ pending: p, token: () => ctx.tokens.get(), onApproved: () => void ctx.reload('Approved — welcome!'), onCancel: ask, onError: (m) => ctx.toast(m, true) }));
   const p = loadPending();
   const fpr = ctx.session.unlockedKey?.getFingerprint().toUpperCase();
   if (p && p.fingerprint === fpr) wait(p);

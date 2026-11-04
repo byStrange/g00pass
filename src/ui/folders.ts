@@ -28,7 +28,8 @@ import {
 } from '../core';
 import { clear, h } from './dom';
 import { fprList, renderPlan } from './plan';
-import { person, personBlock, shortFpr } from './people';
+import { avatarStack, members, person, personBlock, shortFpr, tile } from './people';
+import { icon } from './icons';
 import { type Session, copyWithAutoClear } from './session';
 
 export interface FoldersDeps {
@@ -79,6 +80,7 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
     const folders = s.listFiles().filter((p) => p === '.gpg-id' || p.endsWith('/.gpg-id')).map(dirname).sort();
     for (const f of folders) {
       const depth = f ? f.split('/').length : 0;
+      const meta = h('span', { class: 'folder-meta' });
       list.append(h('button', {
         type: 'button',
         role: 'listitem',
@@ -89,14 +91,15 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
           for (const b of list.children) b.setAttribute('aria-pressed', String(b === list.children[folders.indexOf(f)]));
           void show();
         },
-      }, label(f)));
+      }, icon('folder', { size: 16 }), h('span', { class: 'folder-name' }, label(f)), meta));
+      void members(s, f).then((ps) => meta.replaceChildren(avatarStack(ps.filter((p) => !p.escrow), 3)));
     }
     if (opened !== null && folders.includes(opened)) {
       current = opened;
       void show();
     } else {
       opened = null;
-      body.append(h('p', { class: 'hint empty' }, 'Select a folder.'));
+      body.append(h('div', { class: 'empty' }, h('div', { class: 'empty-icon' }, icon('folder', { size: 28 })), h('h3', {}, 'Pick a folder'), h('p', { class: 'hint' }, 'See who can open it, invite someone, or remove a member.')));
     }
   }
 
@@ -171,9 +174,9 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
     const escrow = await escrowRecipientIds(snapshot);
 
     // ---- members ----
-    const members = await folderRecipientFingerprints(snapshot, folder);
+    const members_ = await folderRecipientFingerprints(snapshot, folder);
     const list = h('ul', { class: 'members' });
-    for (const fpr of members) {
+    for (const fpr of members_) {
       const rm = h('button', { type: 'button', class: 'danger', disabled: !key || fpr === op }, 'Remove…');
       rm.addEventListener('click', async () => {
         const k = deps.session.unlockedKey;
@@ -206,7 +209,7 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
       });
       list.append(h('li', { class: 'member' }, personBlock(await person(snapshot, fpr), { me: op }), fpr === op ? '' : rm));
     }
-    body.append(h('h3', {}, `Members of ${label(folder)}`), list, escrow.length ? h('p', { class: 'hint' }, 'The recovery key is always a member and cannot be removed.') : '');
+    body.append(h('div', { class: 'folder-head' }, tile(folder || 'root', 'lg'), h('div', {}, h('h2', {}, label(folder)), h('p', { class: 'hint' }, `${members_.length} member${members_.length === 1 ? '' : 's'} can open its secrets`))), h('h3', {}, `Members of ${label(folder)}`), list, escrow.length ? h('p', { class: 'hint' }, 'The recovery key is always a member and cannot be removed.') : '');
     body.append(inviteForm(folder));
 
     // ---- rotation checklist ----
@@ -221,8 +224,8 @@ export function mountFolders(deps: FoldersDeps): { el: HTMLElement; refresh: () 
 
     // ---- create sub-folder ----
     const name = h('input', { placeholder: 'sub-folder name, e.g. prod', autocomplete: 'off', spellcheck: 'false' });
-    const picks = members.map((m) => ({ m, box: h('input', { type: 'checkbox', checked: m === op }) }));
-    const pickNames = await namesFor(snapshot, members);
+    const picks = members_.map((m) => ({ m, box: h('input', { type: 'checkbox', checked: m === op }) }));
+    const pickNames = await namesFor(snapshot, members_);
     const extra = h('textarea', { rows: '2', spellcheck: 'false', placeholder: 'Other people: their full key fingerprint (they must have a key in the store), one per line' });
     const createBtn = h('button', { type: 'button', disabled: !key }, 'Review new sub-folder…');
     const createForm = h(

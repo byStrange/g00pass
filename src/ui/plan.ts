@@ -40,24 +40,33 @@ export function fprList(title: string, fprs: readonly string[] | null, cls = '',
 }
 
 export function renderPlan(plan: RecipientChangePlan): HTMLElement {
+  const label = (p: PlannedRecipient) => (p.escrow ? 'Recovery key' : nameOf(p.userIds[0]) || `Key …${tail(p.fingerprint)}`);
+  const added = plan.after.filter((p) => plan.added.includes(p.fingerprint));
+  const removed = plan.before.filter((p) => plan.removed.includes(p.fingerprint));
+  const kept = plan.after.filter((p) => !plan.added.includes(p.fingerprint));
+  const change = (cls: 'added' | 'removed', verb: string, p: PlannedRecipient) =>
+    h('li', { class: cls }, h('span', { class: `badge ${cls}` }, verb), ' ', h('b', { class: 'uid', dir: 'auto' }, label(p)), h('div', { class: 'hint mono', dir: 'ltr' }, formatFingerprint(p.fingerprint)));
   return h(
     'div',
     { class: 'plan' },
-    h('p', {}, `The members of ${plan.folder}/ change exactly as follows. Everyone under “After” will be able to open every secret in this folder.`),
-    recipientList('Before', plan.before, (f) => (plan.removed.includes(f) ? 'removed' : null)),
-    recipientList('After', plan.after, (f) => (plan.added.includes(f) ? 'added' : null)),
+    h('p', {}, `Who can open the secrets in ${plan.folder}/ after this:`),
+    h('ul', { class: 'people-list' }, ...added.map((p) => change('added', 'gets access', p)), ...removed.map((p) => change('removed', 'loses access', p))),
+    kept.length ? h('p', { class: 'hint' }, `Unchanged: ${kept.map(label).join(', ')}.`) : null,
     plan.admins
       ? h('div', { class: 'plan-admins' },
-          h('p', {}, `Folder admins of ${plan.folder}/ (signed admins file) also change:`),
+          h('p', {}, `Folder admins of ${plan.folder}/ (who can approve and remove people) also change:`),
           fprList('Admins before', plan.admins.before, '', adminNames(plan)),
           fprList('Admins after', plan.admins.after, '', adminNames(plan)))
       : null,
     plan.resign.length
-      ? h('p', { class: 'hint' }, `Re-signed by you because their signer loses admin rights: ${plan.resign.map((r) => `${r.folder}/ (${[r.gpgId ? '.gpg-id' : '', r.adminsFile ? 'admins file' : ''].filter(Boolean).join(' + ')})`).join(', ')}`)
+      ? h('p', { class: 'hint' }, `Re-signed by you because their signer loses admin rights: ${plan.resign.map((r) => `${r.folder}/ (${[r.gpgId ? 'member list' : '', r.adminsFile ? 'admins' : ''].filter(Boolean).join(' + ')})`).join(', ')}`)
       : null,
-    plan.droppedEscrow.length ? h('p', { class: 'hint' }, `Retired escrow key(s) dropped: ${plan.droppedEscrow.map(formatFingerprint).join(', ')}`) : null,
+    plan.droppedEscrow.length ? h('p', { class: 'hint' }, `Old recovery key(s) dropped: ${plan.droppedEscrow.map(formatFingerprint).join(', ')}`) : null,
     plan.childBoundaries.length ? h('p', { class: 'hint' }, `Sub-folders that keep their own members: ${plan.childBoundaries.map((c) => c + '/').join(', ')}`) : null,
     plan.warnings.includes('escrow-missing') ? h('p', { class: 'hint' }, 'This also restores the missing recovery key.') : null,
+    h('details', { class: 'fpr-details' }, h('summary', {}, 'Show the full list (before → after)'),
+      recipientList('Before', plan.before, (f) => (plan.removed.includes(f) ? 'removed' : null)),
+      recipientList('After', plan.after, (f) => (plan.added.includes(f) ? 'added' : null))),
   );
 }
 

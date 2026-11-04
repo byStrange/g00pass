@@ -39,7 +39,7 @@ export function joinFlow(ctx: AppCtx, inv: Invite, onDone: () => void): HTMLElem
     const ok = h('input', { type: 'checkbox' });
     show(
       screen(
-        { steps: JOIN_STEPS, step: 0, title: `You're invited to ${inv.repo}`, lead: `You were invited to ${folderLabel(inv.folder)} as ${inv.role === 'reader' ? 'a reader' : 'a folder admin'}. This invite expires ${new Date(inv.expiresAt).toLocaleString()}.` },
+        { steps: JOIN_STEPS, step: 0, title: `You're invited to ${inv.repo}`, icon: 'mail', lead: `You were invited to ${folderLabel(inv.folder)} as ${inv.role === 'reader' ? 'a reader' : 'a folder admin'}. This invite expires ${new Date(inv.expiresAt).toLocaleString()}.` },
         h('p', {}, 'First, make sure this invite really comes from your team. It names these admins:'),
         h('ul', { class: 'admin-list' }, ...inv.anchors.map((a) => h('li', {}, fingerprint(a, true)))),
         differs
@@ -65,7 +65,7 @@ export function joinFlow(ctx: AppCtx, inv: Invite, onDone: () => void): HTMLElem
       if (pending && pending.fingerprint === info.fingerprint && pending.folder === inv.folder) return stepWait(pending);
       return show(
         screen(
-          { steps: JOIN_STEPS, step: 1, title: 'Your key', lead: 'This browser already has a key. Use it for this request?' },
+          { steps: JOIN_STEPS, step: 1, title: 'Your key', icon: 'key', lead: 'This browser already has a key. Use it for this request?' },
           h('p', {}, fingerprint(info.fingerprint), ' ', h('span', { class: 'hint' }, info.userIds.join(', '))),
           h('div', { class: 'actions' },
             h('button', { type: 'button', class: 'primary', onclick: () => stepRequest() }, 'Use this key'),
@@ -75,7 +75,7 @@ export function joinFlow(ctx: AppCtx, inv: Invite, onDone: () => void): HTMLElem
     }
     show(
       screen(
-        { steps: JOIN_STEPS, step: 1, title: 'Create your key', lead: 'Your key lets you read the secrets you are given access to. It is created and kept in this browser, protected by your passphrase.' },
+        { steps: JOIN_STEPS, step: 1, title: 'Create your key', icon: 'key', lead: 'Your key lets you read the secrets you are given access to. It is created and kept in this browser, protected by your passphrase.' },
         keyChooser(() => stepRequest(), err, { preferCreate: true }),
       ),
     );
@@ -84,7 +84,7 @@ export function joinFlow(ctx: AppCtx, inv: Invite, onDone: () => void): HTMLElem
   function stepRequest() {
     show(
       screen(
-        { steps: JOIN_STEPS, step: 2, title: 'Ask for access', lead: `This sends a signed request to ${inv.requestsRepo}. Your admin approves it.` },
+        { steps: JOIN_STEPS, step: 2, title: 'Ask for access', icon: 'inbox', lead: `This sends a signed request to ${inv.requestsRepo}. Your admin approves it.` },
         requestForm({
           config: ctx.config(),
           folder: inv.folder,
@@ -105,11 +105,11 @@ export function joinFlow(ctx: AppCtx, inv: Invite, onDone: () => void): HTMLElem
   }
 
   function stepWait(p: PendingRequest) {
-    show(screen({ steps: JOIN_STEPS, step: 3, title: 'Waiting for approval' }, waitingView({ pending: p, token: () => inv.token, onApproved: () => stepConnect(), onCancel: () => void stepKey(), onError: err })));
+    show(screen({ steps: JOIN_STEPS, step: 3, title: 'Waiting for approval', icon: 'clock' }, waitingView({ pending: p, token: () => inv.token, onApproved: () => stepConnect(), onCancel: () => void stepKey(), onError: err })));
   }
 
   function stepConnect() {
-    show(screen({ steps: JOIN_STEPS, step: 4, title: 'You are approved', lead: 'One last thing: a token so this app can read the store.' }, connectReader(ctx, onDone)));
+    show(screen({ steps: JOIN_STEPS, step: 4, title: 'You are approved', icon: 'check', lead: 'One last thing: a token so this app can read the store.' }, connectReader(ctx, onDone)));
   }
 
   stepAdmins();
@@ -141,9 +141,9 @@ export function pendingFlow(ctx: AppCtx, p: PendingRequest, onDone: () => void):
   const root = h('div', { class: 'flow' });
   const wait = () =>
     root.replaceChildren(
-      screen({ steps: ['Approval', 'Connect'], step: 0, title: 'Waiting for approval' }, waitingView({ pending: p, token: () => null, onApproved: connect, onCancel: () => onDone(), onError: (m) => ctx.toast(m, true) })),
+      screen({ steps: ['Approval', 'Connect'], step: 0, title: 'Waiting for approval', icon: 'clock' }, waitingView({ pending: p, token: () => null, onApproved: connect, onCancel: () => onDone(), onError: (m) => ctx.toast(m, true) })),
     );
-  const connect = () => root.replaceChildren(screen({ steps: ['Approval', 'Connect'], step: 1, title: 'You are approved', lead: 'Paste the read token for the store.' }, connectReader(ctx, onDone)));
+  const connect = () => root.replaceChildren(screen({ steps: ['Approval', 'Connect'], step: 1, title: 'You are approved', icon: 'check', lead: 'Paste the read token for the store.' }, connectReader(ctx, onDone)));
   wait();
   return root;
 }

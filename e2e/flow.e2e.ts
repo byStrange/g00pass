@@ -31,7 +31,7 @@ let demo: DemoStore;
 const errors: string[] = [];
 
 async function profile(): Promise<{ ctx: BrowserContext; page: Page }> {
-  const ctx = await browser.newContext({ serviceWorkers: 'block', deviceScaleFactor: 2, viewport: { width: 900, height: 1000 } });
+  const ctx = await browser.newContext({ serviceWorkers: 'block', deviceScaleFactor: 2, viewport: { width: 1280, height: 860 } });
   await ctx.route('https://api.github.com/**', async (route) => {
     const req = route.request();
     const res = gh.handle(req.method(), req.url(), await req.allHeaders(), req.postData());
@@ -100,8 +100,8 @@ async function reveal(p: Page, entry: string): Promise<string> {
   return (await detail.locator('code.secret').textContent()) ?? '';
 }
 async function openFolder(p: Page, folder: string) {
-  await tabTo(p, 'Access');
-  await p.locator('.folder-btn', { hasText: new RegExp(`^${folder}$`) }).click();
+  await tabTo(p, 'People');
+  await p.locator('.folder-btn').filter({ has: p.locator('.folder-name', { hasText: new RegExp(`^${folder}$`) }) }).click();
   await p.locator('.folder-admin h3').first().waitFor({ timeout: 30_000 });
 }
 
@@ -150,7 +150,7 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     await shot(p, '04-secrets');
 
     // ---- admin: add a secret, then change its password ----
-    await p.getByRole('button', { name: '+ New secret' }).click();
+    await p.getByRole('button', { name: 'New secret' }).click();
     const detail = p.locator('section.detail');
     await detail.getByLabel('Folder', { exact: true }).selectOption('team');
     await detail.getByLabel('Name', { exact: true }).fill('github');
@@ -161,7 +161,16 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     await shot(p, '05-new-secret');
     await detail.getByRole('button', { name: 'Add secret' }).click();
     await waitStatus(p, /Added team\/github/);
-    await detail.getByRole('heading', { name: 'team/github' }).waitFor();
+    await detail.getByRole('heading', { name: 'github' }).waitFor();
+    await shot(p, '05b-secret-detail');
+    await p.setViewportSize({ width: 390, height: 844 });
+    await shot(p, '05c-phone');
+    await p.setViewportSize({ width: 1280, height: 860 });
+    await p.emulateMedia({ colorScheme: 'dark' });
+    await p.mouse.move(0, 0);
+    await p.waitForTimeout(400); // let colour transitions finish
+    await shot(p, '05d-dark');
+    await p.emulateMedia({ colorScheme: 'light' });
     await detail.getByRole('button', { name: 'Edit' }).click();
     await detail.getByLabel('Password', { exact: true }).fill('github-pass-v2');
     await detail.getByRole('button', { name: 'Save changes' }).click();
@@ -210,13 +219,13 @@ describe('g00pass in the browser (demo store, fake GitHub)', () => {
     expect(gh.repo(REQUESTS).issues[0]!.body).not.toContain('github_pat_');
 
     // ---- admin: approve ----
-    await tabTo(p, 'Access');
+    await tabTo(p, 'People');
     await inboxIdle(p);
     await p.locator('.inbox').getByRole('button', { name: 'Refresh' }).click();
     await inboxIdle(p);
     const item = p.locator('article.request');
     await count(item, 1);
-    await count(item.locator('.badge.ok', { hasText: 'Invited' }), 1);
+    await count(item.locator('.chip.ok', { hasText: 'Invited' }), 1);
     await item.getByPlaceholder('last 16 characters').fill(tail);
     await item.getByText('I reviewed the member change above').click();
     await shot(p, '09-access-approve');
