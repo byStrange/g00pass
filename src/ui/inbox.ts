@@ -33,7 +33,7 @@ export interface InboxDeps {
 }
 
 const PHASES: Record<ReencryptProgress['phase'], string> = {
-  verifying: 'Verifying recipients',
+  verifying: 'Checking the member list',
   reencrypting: 'Re-encrypting',
   committing: 'Committing',
   done: 'Done',
@@ -104,7 +104,7 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
       if (inbox.blocked.length) {
         const list = h('ul', { class: 'invalid' });
         for (const b of inbox.blocked.slice(0, 20)) list.append(h('li', {}, `#${b.issue.number} (${b.request.folder}): NOT approvable. ${b.reason}`));
-        body.append(h('p', { class: 'banner danger', role: 'alert' }, `${inbox.blocked.length} request(s) cannot be approved because the folder's current recipient list is not verified or cannot be re-signed. Do not work around this: someone may have edited it without authority.`), list);
+        body.append(h('p', { class: 'banner danger', role: 'alert' }, `${inbox.blocked.length} request(s) cannot be approved because the folder's current member list is not verified or cannot be re-signed. Do not work around this: someone may have edited it without authority.`), list);
       }
       if (inbox.hiddenReasons.length) {
         const list = h('ul', { class: 'invalid' });
@@ -230,7 +230,7 @@ export function mountInbox(deps: InboxDeps): { el: HTMLElement; refresh: () => P
       r.note ? h('pre', { class: 'details', dir: 'auto' }, r.note) : null,
       renderPlan(plan),
       h('label', {}, `Ask ${r.name} for their fingerprint through another channel (not this issue) and type its LAST ${FINGERPRINT_SUFFIX_LENGTH} characters:`, suffix),
-      h('label', { class: 'inline' }, reviewed, 'I reviewed the recipient change above (before → after) and approve exactly that.'),
+      h('label', { class: 'inline' }, reviewed, 'I reviewed the member change above (before → after) and approve exactly that.'),
       invited ? '' : h('label', { class: 'inline' }, ack, 'I understand this request has no verified invite.'),
       h('div', { class: 'row' }, approveBtn, cancelBtn),
       progress,

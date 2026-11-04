@@ -51,6 +51,8 @@ requester for their fingerprint out of band and type its last 16 characters,
 and review the exact before → after recipient list. Folders whose current
 recipient list does not verify cannot be approved.
 
+**Secrets:** in the *Secrets* tab, "+ New secret" adds one (folder, name, password with a generator, notes); open a secret to edit or delete it. The editor shows who will be able to read it. Changing the password (the first line) is recorded so the password checklist knows it was changed. Saving needs a token with *Contents: Read and write*.
+
 **Invites, removal, sub-folders:** in *Manage folder*, an admin can invite
 someone (a link with an issues-only token in the URL fragment and the trust
 anchors; a signed invite record is consumed by the approval), remove a member

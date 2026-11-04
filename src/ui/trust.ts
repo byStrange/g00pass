@@ -29,21 +29,21 @@ function describe(st: FolderTrustStatus): string {
   if (st.verified) {
     const gone = st.warnings.filter((w) => w.startsWith('boundary-vanished:')).map((w) => w.slice('boundary-vanished:'.length) + '/');
     return gone.length
-      ? `verified, but the recipient list of sub-folder(s) ${gone.join(', ')} was DELETED; writing there and re-encrypting this folder are disabled`
-      : 'verified: recipients signed by an authorized admin';
+      ? `verified, but the member list of sub-folder(s) ${gone.join(', ')} was DELETED; saving there and changing members here are disabled`
+      : '✓ member list signed by an admin';
   }
   switch (st.code) {
     case 'signature-missing':
-      return 'NOT verified: recipients are not signed by an admin. Writing is disabled.';
+      return 'NOT verified: the member list is not signed by an admin. Saving is disabled.';
     case 'unknown-signer':
     case 'signature-invalid':
-      return `NOT verified: recipient list was changed by an unauthorized key or the signature is invalid (${st.reason ?? ''}). Writing is disabled.`;
+      return `NOT verified: the member list was changed by someone who is not an admin, or its signature is invalid (${st.reason ?? ''}). Saving is disabled.`;
     case 'anchor-mismatch':
-      return 'NOT verified: root recipients do not match your pinned global admins. Writing is disabled.';
+      return 'NOT verified: the store’s admins do not match the admins this browser trusts. Saving is disabled.';
     case 'boundary-vanished':
-      return `NOT verified: a sub-folder's own recipient list (.gpg-id) was deleted (${st.reason ?? ''}). Writing is disabled so its secrets are not encrypted to the parent's recipients.`;
+      return `NOT verified: a sub-folder’s member list was deleted (${st.reason ?? ''}). Saving is disabled so its secrets are not shared with the parent folder’s members.`;
     case 'boundary-undeclared':
-      return `NOT verified: this folder's recipient list is not declared by its parent folder's signature (${st.reason ?? ''}). Writing is disabled.`;
+      return `NOT verified: the parent folder’s admin never approved this folder’s member list (${st.reason ?? ''}). Saving is disabled.`;
     default:
       return `NOT verified: ${st.reason ?? 'unknown reason'}. Writing is disabled.`;
   }
@@ -72,13 +72,13 @@ export function createTrustPanel(opts: { setStatus: (t: string, isError?: boolea
 
   /** Manual pin (store-layout.md §Trust anchors, source 'manual'): full fingerprints typed/pasted from a trusted channel. */
   function manualPinForm(repo: GitHubRepo, onChange: () => void): HTMLElement {
-    const ta = h('textarea', { rows: '3', spellcheck: 'false', placeholder: 'Full fingerprints of the global admins, one per line' });
+    const ta = h('textarea', { rows: '3', spellcheck: 'false', placeholder: 'Full key fingerprints of the admins, one per line' });
     const ok = h('input', { type: 'checkbox' });
     return h(
       'details',
       {},
-      h('summary', {}, 'Pin global admins manually'),
-      h('p', { class: 'hint' }, 'Paste the FULL fingerprints your admin gave you through a channel you already trust. This replaces the pinned set and clears derived trust state for this store.'),
+      h('summary', {}, 'Set trusted admins manually'),
+      h('p', { class: 'hint' }, 'Paste the FULL key fingerprints your admin gave you through a channel you already trust. This replaces the trusted admins for this store.'),
       ta,
       h('label', { class: 'inline' }, ok, 'These fingerprints come from my admin through a trusted channel.'),
       h('button', {
@@ -88,10 +88,10 @@ export function createTrustPanel(opts: { setStatus: (t: string, isError?: boolea
           try {
             const fprs = normalizeFingerprints(ta.value.split(/[\n,;]+/).map((l) => l.replace(/\s+/g, '')).filter(Boolean));
             if (!fprs.length) return opts.setStatus('Enter at least one full fingerprint.', true);
-            if (!confirm(`Pin these ${fprs.length} global admin(s)?\n\n${fprs.map(formatFingerprint).join('\n')}`)) return;
+            if (!confirm(`Trust these ${fprs.length} admin(s)?\n\n${fprs.map(formatFingerprint).join('\n')}`)) return;
             pinAnchors(repo, fprs, 'manual');
             ta.value = '';
-            opts.setStatus('Global admins pinned manually.');
+            opts.setStatus('Trusted admins saved.');
             onChange();
           } catch (e) {
             opts.setStatus(e instanceof G00passError ? e.message : 'Invalid fingerprints.', true);
@@ -105,23 +105,23 @@ export function createTrustPanel(opts: { setStatus: (t: string, isError?: boolea
     clear(settings);
     settings.hidden = false;
     const pinned = getPinnedAnchors(repo);
-    settings.append(h('h2', {}, 'Pinned global admins (trust anchors)'));
+    settings.append(h('h2', {}, 'Trusted admins'));
     if (!pinned) {
-      settings.append(h('p', { class: 'hint' }, `None pinned for ${storeIdOf(repo)}.`), manualPinForm(repo, onChange));
+      settings.append(h('p', { class: 'hint' }, `No trusted admins yet for ${storeIdOf(repo)}.`), manualPinForm(repo, onChange));
       return;
     }
     settings.append(
-      h('p', { class: 'hint' }, `${storeIdOf(repo)} · ${pinned.source} · ${pinned.pinnedAt}`),
+      h('p', { class: 'hint' }, `${storeIdOf(repo)} · confirmed via ${({ 'first-use': 'first connect', invite: 'invite', manual: 'manual entry', rollover: 'admin change' } as Record<string, string>)[pinned.source] ?? pinned.source} · ${new Date(pinned.pinnedAt).toLocaleString()}`),
       h('ul', { class: 'fprs' }, ...pinned.anchors.map((a) => h('li', { class: 'mono' }, formatFingerprint(a)))),
       h('button', {
         class: 'danger',
         onclick: () => {
-          if (!confirm('Forget the pinned global admins for this store? Writing stays disabled until you pin again after comparing fingerprints with your admin.')) return;
+          if (!confirm('Forget the trusted admins for this store? Saving stays disabled until you confirm the admins again (compare their fingerprints with them first).')) return;
           resetAnchors(repo);
-          opts.setStatus('Pinned anchors reset.');
+          opts.setStatus('Trusted admins forgotten.');
           onChange();
         },
-      }, 'Reset pinned anchors'),
+      }, 'Forget trusted admins'),
       manualPinForm(repo, onChange),
     );
   }
@@ -137,8 +137,8 @@ export function createTrustPanel(opts: { setStatus: (t: string, isError?: boolea
       fprs.map(async (f) => h('li', {}, h('span', { class: 'mono' }, formatFingerprint(f)), h('span', { class: 'hint' }, ` claimed: ${await claimedUserIds(snapshot, f)}`))),
     );
     card.append(
-      h('p', { class: 'banner warn' }, 'This device has not pinned the global admins of this store yet. Writing is disabled until you do.'),
-      h('p', {}, 'Global admins listed in the root .gpg-id. Compare EVERY fingerprint with your admin out of band (in person, phone, or a channel you already trust). Names come from the repository and prove nothing.'),
+      h('p', { class: 'banner warn' }, 'This browser has not confirmed the admins of this store yet. Saving is disabled until you do.'),
+      h('p', {}, 'Admins listed by the store. Compare EVERY fingerprint with your admin out of band (in person, phone, or a channel you already trust). Names come from the repository and prove nothing.'),
       h('ul', { class: 'fprs' }, ...items),
       h('label', { class: 'inline' }, ok, 'I compared these fingerprints with my admin and they match.'),
       h('button', {
@@ -148,10 +148,10 @@ export function createTrustPanel(opts: { setStatus: (t: string, isError?: boolea
             return;
           }
           pinAnchors(repo, fprs, 'first-use');
-          opts.setStatus('Global admins pinned.');
+          opts.setStatus('Admins confirmed.');
           onChange();
         },
-      }, 'Pin these global admins'),
+      }, 'Trust these admins'),
     );
   }
 
@@ -168,20 +168,20 @@ export function createTrustPanel(opts: { setStatus: (t: string, isError?: boolea
     if (gen !== generation) return;
     clear(card);
     card.hidden = false;
-    card.append(h('h2', {}, 'Recipient trust'));
+    card.append(h('h2', {}, 'Folder status'));
     if (!root.ok) {
       if (!root.pinned) {
         await renderPinPrompt(snapshot, repo, root, rerender);
       } else {
         card.append(
           h('p', { class: 'banner danger', role: 'alert' },
-            `Root recipient list is NOT trusted: ${root.reason}. Writing is disabled in every folder. Do not ignore this: someone may be trying to add their key.`),
+            `The store’s admin list is NOT trusted: ${root.reason}. Saving is disabled in every folder. Do not ignore this: someone may be trying to add their key.`),
         );
         if (root.added.length) card.append(h('p', {}, 'Not pinned but listed in the root .gpg-id:'), h('ul', { class: 'fprs' }, ...root.added.map((a) => h('li', { class: 'mono' }, formatFingerprint(a)))));
         if (root.removed.length) card.append(h('p', {}, 'Pinned but missing from the root .gpg-id:'), h('ul', { class: 'fprs' }, ...root.removed.map((a) => h('li', { class: 'mono' }, formatFingerprint(a)))));
       }
     } else if (root.rolledOver) {
-      card.append(h('p', { class: 'banner warn' }, `Global admins changed (signed by ${formatFingerprint(root.signer)}). Pinned anchors were updated; check them in the settings below.`));
+      card.append(h('p', { class: 'banner warn' }, `The admins changed (approved by an admin, key ${formatFingerprint(root.signer)}). The trusted admins were updated; check them below.`));
     }
     card.append(
       h('ul', { class: 'folders' }, ...statuses.map((s) =>

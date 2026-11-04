@@ -175,3 +175,22 @@ label.inline { display: flex; align-items: center; gap: .5rem; }
 .member-who .badge { margin-left: .4rem; }
 .member .fpr { font-size: .78rem; }
 .checklist > button, .folder-admin button { justify-self: start; }
+
+/* ---- secrets editor, people ---- */
+.pane-left > button.primary { width: 100%; }
+.pw-row { display: flex; gap: .4rem; }
+.pw-row input { flex: 1; }
+.readers { margin: 0; }
+.people-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .4rem; }
+.people-list li { padding: .45rem .6rem; border-radius: 8px; background: var(--soft); }
+.people-list li .badge { margin-left: .4rem; }
+.people-list .mono { font-size: .78rem; }
+.person { display: grid; gap: .1rem; min-width: 0; }
+.person .badge { margin-left: .4rem; }
+.person .mono { font-size: .78rem; }
+.pick-list { list-style: none; margin: 0; padding: 0; display: grid; gap: .3rem; }
+.explain { margin: 0; padding-left: 1.1rem; display: grid; gap: .35rem; font-size: .9rem; }
+.panel.intro p { margin: 0; }
+.glossary { margin: 0; display: grid; gap: .55rem; }
+.gloss dt { font-weight: 600; }
+.gloss dd { margin: 0; color: var(--muted); font-size: .9rem; }

@@ -45,3 +45,5 @@ export * from './rotation';
 export * from './access/remove';
 export * from './access/subfolders';
 export * from './invites';
+export * from './secrets';
+export * from './password';
